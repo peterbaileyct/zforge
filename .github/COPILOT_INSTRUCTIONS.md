@@ -1,0 +1,1 @@
+NOTE: See agents.md in the project root for instructions to LLM agents. Copilot: follow these rules.

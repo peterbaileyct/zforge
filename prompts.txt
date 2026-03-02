@@ -1,0 +1,25 @@
+For future spec-driven implementation, let's work prompt-by-prompt on a spec; help me make the documentation per your instructions.
+
+Z-Forge is an AI (LLM)-powered tool for creating and running short Interactive Fiction experiences. Descriptions of fictional worlds and their characters and situations are cross-referenced with the player's personal preferences and a prompt to create brief scenarios across 5-15 rooms. These are instantiated in .gblorb format, and the Glulx engine is then used to play the static games.
+
+A Z-Forge World specification, recorded in JSON format with the .zworld extension, includes the following details:
+- Name, e.g. "Discworld"
+- Locations, which can be indicated at nested levels of granularity
+- Characters, who have a text id (to allow for unambiguous cross-reference), one or more Names, with each having a Context in the form of a brief free-text description in the case of multiple names, a History
+- Relationships, which describe the personal history and current social/professional/emotional relationships between two characters, identified by their text ids
+- Events, which are descriptions of significant occurrences within this World that greatly affected Characters and/or Locations; each has a "Date", though this can be a literal date according to an in-world numeric calendar or a description of approximate time relative to other events
+
+Z-Forge can take in a plain-text description of a world and create a structured .zworld from it using an LLM, e.g. to bootstrap the development of fan-fiction from a Wikipedia summary.
+
+Z-Forge allows the user to set their general preferences for their interactive fiction scenarios directly, or by answering a set of questions about their opinions of example scenarios, somewhat resembling the "Virtues" quizzes of the Ultima series. Preferences include a balance between plot- or character-focused experiences and complexity of puzzles, i.e. challenge level. When Z-Forge is first opened, the user will be prompted to take the aforementioned quiz but will be able to cancel out of it to set preferences manually.
+
+Z-Forge creates a Glulx interactive fiction experience as follows:
+- Select or create a World
+- Ask the user for their input on the scenario; this is open-ended and could describe a specific situation (e.g. "Moist von Lipwig is now running the bank and has found that the gold is mising") or a genre/mood (e.g. "a humorous but uplifting exploration of the creation of fiat currency and the true meaning of value")
+- Use World file as context for a "writer" LLM, along with a brief description of the ZWorld format and of the Glulx output format (.ulx; compression to .gblorb comes later)
+- Prompt the Writer to create a .ulx experience across 5-15 rooms based on the given prompt, the description of the world, and the player's preferences
+- Use the Glulx engine to validate the .ulx file; if it is not valid, indicate the error to the "writer" LLM and prompt it to try and repair; repeat this loop for up to ten recurrences if needed
+- Compress to .gblorb format and save to local storage (as appropriate for the platform)
+- If configured to do so, start this experience using the Glulx engine (this is the default configuration)
+
+When a Glulx experience is running, the player has a very simple interface in which has a one-line entry for user input at the bottom and game output and player input is displayed in a long, scrolling text display above it. Game output is displayed left-justified and player input is right-justified, resembling text message applications but not using bubbles or other containers. This display is in Veteran Typewriter or a similar typewriter-like font by default. A menu allows the user to save and load their progress within the given experience, specifying the name of their save file. On PC and Mac, this is shown in the main menu bar; on mobile and Web, this is opened by clicking/touching a "hamburger" menu icon to the left of the text input. On all systems, "return" submits the current input to the Glulx engine, and a small button with a "return"/"line feed" icon to the right of the text input can also be used to submit input.
