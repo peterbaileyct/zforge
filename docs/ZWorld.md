@@ -1,5 +1,6 @@
 # Z-Forge World Format (.zworld)
 A Z-Forge World specification, recorded in JSON format with the .zworld extension, includes the following details:
+- Id, a unique text identifier for the world used for cross-referencing and file organization, e.g. "discworld"
 - Name, e.g. "Discworld"
 - Locations, which can be indicated at nested levels of granularity
 - Characters, who have a text id (to allow for unambiguous cross-reference), one or more Names, with each having a Context in the form of a brief free-text description in the case of multiple names, a History
@@ -9,6 +10,7 @@ A Z-Forge World specification, recorded in JSON format with the .zworld extensio
 ### 1.1. Sample World JSON Schema
 ```json
 {
+  "id": "discworld",
   "name": "Discworld",
   "locations": [
     {

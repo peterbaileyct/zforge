@@ -1,82 +1,94 @@
 # World Creation Workflow
-- **Input:** Plain-text world description (user or external source)
-- **Process:** LLM parses and generates .zworld JSON
-- **Output:** Structured .zworld file
-- **Use Case:** Bootstrapping from summaries, e.g. Wikipedia
+A ZWorld is generated from a plain-text description by the following process:
 
-## 3. User Preferences
-- Set directly or via quiz (Ultima "Virtues" style)
-- **Preference Fields:**
-  - `focus`: "plot" | "character" | "balanced"
-  - `challenge_level`: integer (1-5)
-  - `genre`: string (optional)
-  - `mood`: string (optional)
-- **Quiz:**
-  - Shown on first launch
-  - Can be skipped for manual setup
-  - Example question: "Do you prefer solving puzzles or exploring character motivations?"
+- A plain-text world description is provided, either by direct entry or by providing a Word or PDF file.
+- A new CreateWorldProcess object is inserted into the ZForgeManager, thus exposing it to the MCP Server; this CreateWorldProcess is responsible for the following steps
+- The configured LLM is given a system prompt of "You are a literature editor. You are to determine whether the following is a clear description of a fictional world, listing characters and their relationships with one another, locations, and events: {given description}", an action prompt to "evaluate the given world description", and a tool to answer yes or no by calling a function that sets InputValid = true or false on the CreateWorldProcess
+- The above is repeated up to five times until the given answer is yes; InputValid will be set to null between attempts so that the true/false will be recognized as a change
+- If the above has failed after five attempts, the user LLM will be asked to describe why the given text is inadequate or inappropriate; the user will then be shown a message indicating the failure and including the LLM's explanation; the world creation attempt then ends.
+- If the above succeeds, the LLM will be given a system prompt of "You are a designer for an interactive fiction system. ZWorlds, used as the basis of your interactive fiction experiences, consist of the following: {zworld spec from ZWorld.md} Create a ZWorld from the following description of a fictional world: {given description}", an action prompt of "build the specified ZWorld", and a tool that calls the "create zworld" method on the ZForgeManager, which delegates it to the ZWorldManager
+- The ZWorld is created in memory and saved to storage (configured folder on Mac/PC; application storage on mobile)
+- The user is asked if they would like to [generate an experience]("Experience Generation.md") from this new world
 
-## 4. Scenario Generation & Game Flow
+## CreateWorldProcess State Machine
+The process tracks its current state via a `status` enum:
+- `awaitingValidation` — Initial state; LLM is evaluating input validity
+- `awaitingGeneration` — Input validated; LLM is generating ZWorld
+- `complete` — ZWorld created successfully
+- `failed` — Process failed (invalid input after 5 attempts, or generation error)
+
+## CreateWorldProcess Properties
+- **Inputs**: `inputText`: String — the plain-text world description
+- **State**: `inputValid`: bool? — result of last validation (null between attempts)
+- **Counters**: `validationIterations`: int — attempts at validation (max 5)
+- **Status**: `status`: CreateWorldStatus, `failureReason`: String?
+
+## MCP Tool Derivation
+Per [Managers, Processes, and MCP Server](Managers,%20Processes,%20and%20MCP%20Server.md), implementation agents derive MCP tools from this specification:
+
+| Tool | Called By | Accepts | Performs | Advances To |
+|------|-----------|---------|----------|-------------|
+| `world_validate_input` | LLM (Editor role) | valid: bool | Sets `inputValid`, increments counter | `awaitingGeneration` (valid) or retry/`failed` |
+| `world_create_zworld` | LLM (Designer role) | name, locations, characters, relationships, events | Creates ZWorld via ZWorldManager | `complete` |
+| `world_explain_rejection` | LLM (Editor role) | explanation: String | Sets `failureReason` | `failed` |
+
+## Flow Diagram
 
 ```mermaid
 flowchart TD
-    A[Select/Create World] --> B[Set Preferences]
-    B --> C[Input Scenario Prompt]
-    C --> D[LLM Writer: Generate .i7]
-    D --> E[Zart Engine: Validate .i7]
-    E -- Valid --> F[Compress to .gblorb]
-    F --> G[Save & Launch Game]
-    E -- Invalid/Error --> D
-    D -- Retry Limit Exceeded --> H[Report Failure]
+    A[User provides world description\ntext input or file] --> B[CreateWorldProcess.run]
+    B --> C{LLM validates input\nattempt 1–5}
+    C -- valid=true --> D[LLM generates ZWorld\nvia create_zworld tool]
+    C -- valid=false / all attempts exhausted --> E[LLM explains rejection]
+    E --> F[Show error to user\nworld creation ends]
+    D --> G[ZForgeMcpServer dispatches\ncreate_zworld tool call]
+    G --> H[ZWorldManager saves .zworld file]
+    H --> I[ZWorldEvent.created broadcast]
+    I --> J[HomeScreen updates world list]
+    J --> K[User prompted to\ncreate an experience]
 ```
 
-- **Step Details:**
-  1. User selects or creates a World (.zworld)
-  2. User sets preferences (direct or quiz)
-  3. User provides scenario prompt (situation, genre, mood)
-  4. LLM Writer receives:
-     - World file
-     - ZWorld and Inform format descriptions
-     - User preferences
-  5. Writer generates .i7 file (5-15 rooms)
-  6. Zart engine validates .i7
-     - If invalid, error is sent to Writer for repair (up to 10 times)
-  7. Valid .i7 is compressed to .gblorb and saved
-  8. Game starts automatically (default)
+## Sequence Diagram
 
-## 5. Gameplay Interface
-- **Input:** One-line at bottom
-- **Output:** Scrolling text above
-- **Display:**
-  - Game output: left-justified
-  - Player input: right-justified (like chat, no bubbles)
-  - Font: Veteran Typewriter or similar (monospace, typewriter aesthetic)
-- **Save/Load:**
-  - PC/Mac: main menu bar
-  - Mobile/Web: hamburger menu left of input
-  - User specifies save file name
-- **Input Submission:**
-  - "Return" key submits
-  - Button with return/line feed icon also submits (right of input)
-- **Accessibility:**
-  - All controls keyboard-accessible
-  - High-contrast and large-text modes recommended
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant UI as CreateWorldScreen
+    participant P as CreateWorldProcess
+    participant LLM as LlmConnector (OpenAI)
+    participant MCP as ZForgeMcpServer
+    participant WM as ZWorldManager
 
-## 6. Error Handling & Agentic Flow
-- LLM Writer is prompted with error details if .i7 is invalid
-- Retry up to 10 times, with error context each time
-- On repeated failure, user is notified and can:
-  - Edit prompt
-  - Edit world
-  - Retry
+    U->>UI: Enter/load world description
+    U->>UI: Tap "Create World"
+    UI->>P: run(inputText)
 
-## 7. Extensibility & Future Directions
-- **World Format:**
-  - Allow for custom fields (e.g. magic systems, technology levels)
-- **Preferences:**
-  - Add more nuanced sliders (e.g. humor, darkness, pacing)
-- **Game Output:**
-  - Support for images, sound, and multimedia in Glulx
-- **LLM Integration:**
-  - Pluggable LLM backends
-  - Fine-tuning for specific genres or worlds
+    loop Validation (up to 5 attempts)
+        P->>LLM: execute(validate_input tool)
+        LLM-->>P: validate_input(valid: true/false)
+    end
+
+    alt Input valid
+        P->>LLM: execute(create_zworld tool)
+        LLM-->>P: create_zworld(name, locations, characters, ...)
+        P->>MCP: dispatch("create_zworld", args)
+        MCP->>WM: create(ZWorld)
+        WM-->>MCP: saved
+        MCP-->>P: ZWorld
+        P-->>UI: status=success
+        UI-->>U: "World created!"
+    else Input rejected
+        P->>LLM: execute(explain rejection)
+        LLM-->>P: explanation text
+        P-->>UI: status=inputRejected, errorMessage
+        UI-->>U: Show rejection explanation
+    end
+```
+
+## Implementation Files
+- `lib/processes/create_world_process.dart` — `CreateWorldProcess`
+- `lib/services/llm/llm_connector.dart` — `LlmConnector` abstract class
+- `lib/services/llm/openai_connector.dart` — `OpenAiConnector`
+- `lib/services/mcp/zforge_mcp_server.dart` — `ZForgeMcpServer`
+- `lib/services/managers/zworld_manager.dart` — `ZWorldManager`
+- `lib/ui/screens/create_world_screen.dart` — `CreateWorldScreen`

@@ -1,0 +1,9 @@
+# Player Preferences
+Player Preferences in Z-Forge consist of a few simple user-defined data points. Any "scales", unless otherwise specified, range from 1 to 10 in the order their ends are specified in. For example, "Character to Plot scale" indicates a score where 1 is a strong preference for character development and 10 is a strong preference for plot development. If only one term is specified, then a range of 1 to 10 on that specific quality can be assumed (e.g. "Puzzle complexity scale").
+
+- Character to Plot scale: Does the player prefer character development or plot development?
+- Narrative to Dialog scale: Does the player like a lot of narrative (explaining situations and describing people, places, and things physically) or a lot of dialog (allowing characters to provide color and exposition)?
+- Puzzle complexity scale: How hard should puzzles be (as opposed to a very easy, narrative/plot-driven experience)?
+- Levity scale: Does the player generally prefer a somber/intense or funny/uplifting experience?
+- General preferences: Free text allowing the player to further describe their general preferences in interactive fiction.
+- Logical vs. mood scale: How important is it to the player that the experience is logically consistent, e.g. is a discrepancy between the color of a character's hair in dialog 1 and dialog 2 acceptable, or is it not OK if a story takes place in the real world and a character smokes a brand of cigarette that was no longer manufactured at the time in which the story takes place? Weighed against the need to establish a mood appropriate to their established preferences.

@@ -1,11 +1,11 @@
 # Z-Forge
 
-Z-Forge is an AI-powered tool for creating and running short Interactive Fiction (IF) experiences. It leverages large language models (LLMs) to generate fictional worlds, characters, and scenarios, compiling them into playable Glulx-format games coded in Inform.
+Z-Forge is an AI-powered tool for creating and running short Interactive Fiction (IF) experiences. It leverages large language models (LLMs) to generate fictional worlds, characters, and scenarios, compiling them into playable ink-format games.
 
 ## Features
 - **AI-assisted World Building:** Generate structured world files (.zworld) from plain-text descriptions.
 - **Personalized Scenarios:** Cross-reference player preferences and prompts to create unique IF experiences.
-- **Zart Engine Integration:** Compile and play games in .gblorb format with a streamlined, typewriter-style interface.
+- **ink Engine Integration:** Compile and play games using inkjs (via flutter_js) and ink_runtime with a streamlined, typewriter-style interface.
 - **Flexible Preferences:** Set preferences directly or via a quiz inspired by classic IF games.
 - **Save/Load Support:** Save and resume progress across platforms.
 
@@ -16,13 +16,36 @@ Z-Forge is an AI-powered tool for creating and running short Interactive Fiction
 4. **Generate & Play:** Z-Forge creates a playable IF experience, which you can play immediately.
 
 ## Framework
-Z-Forge uses Flutter for a cross-platform UI (iOS, Android, PC, MacOS, Web) and the Zart library (from pub.dev) for running Glulx experiences.
+Z-Forge uses Flutter for a cross-platform UI (iOS, Android, PC, MacOS, Web), inkjs (via flutter_js) for compiling ink scripts, and ink_runtime for playing experiences.
+
+## Implementation Status
+
+| Feature | Status |
+|---|---|
+| Flutter project scaffold (all platforms) | ✅ Phase 1 |
+| ZWorld data model & file storage | ✅ Phase 1 |
+| LLM Abstraction Layer (OpenAI) | ✅ Phase 1 |
+| MCP Server (`ZForgeMcpServer`) | ✅ Phase 1 |
+| World Creation workflow | ✅ Phase 1 |
+| Player Preferences | ✅ Phase 1 |
+| Home / LLM Config / Preferences screens | ✅ Phase 1 |
+| ink experience generation | ✅ Phase 2 |
+| ink gameplay interface | ✅ Phase 2 |
+| Save/Load progress | ✅ Phase 2 |
 
 ## Documentation
-- [Specification & Format Details]("docs/Data and File Specifications.md")
-- [World Generation Process]("docs/World Generation.md")
-- [Experience Generation Process]("docs/Experience Generation.md")
-- [User Experience]("docs/User Experience.md")
+- [Data Models ER Diagram](docs/ER%20Diagram.md)
+- [Specification & Format Details](docs/Data%20and%20File%20Specifications.md)
+- [World Generation Process](docs/World%20Generation.md)
+- [Experience Generation Process](docs/Experience%20Generation.md)
+- [IF Engine Abstraction Layer](docs/IF%20Engine%20Abstraction%20Layer.md)
+- [Ink Engine Connector](docs/Ink%20Engine%20Connector.md)
+- [Managers, Processes, and MCP Server](docs/Managers,%20Processes,%20and%20MCP%20Server.md)
+- [Player Preferences](docs/Player%20Preferences.md)
+- [User Experience](docs/User%20Experience.md)
+- [LLM Abstraction Layer](docs/LLM%20Abstraction%20Layer.md)
+- [LLM Orchestration](docs/LLM%20Orchestration.md)
+- [ZWorld Format](docs/ZWorld.md)
 
 ---
 
