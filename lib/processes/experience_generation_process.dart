@@ -7,6 +7,33 @@ import '../services/llm/llm_connector.dart';
 import '../services/mcp/zforge_mcp_server.dart';
 import '../services/if_engine/if_engine_connector.dart';
 
+/// A single entry in the experience generation action log.
+class LogEntry {
+  final DateTime timestamp;
+  final String fromState;
+  final String toState;
+  final String action;
+  final String? rationale;
+
+  LogEntry({
+    required this.timestamp,
+    required this.fromState,
+    required this.toState,
+    required this.action,
+    this.rationale,
+  });
+
+  @override
+  String toString() {
+    final time = '${timestamp.hour.toString().padLeft(2, '0')}:'
+        '${timestamp.minute.toString().padLeft(2, '0')}:'
+        '${timestamp.second.toString().padLeft(2, '0')}';
+    final stateTransition = '$fromState → $toState';
+    final rationaleText = rationale != null ? '\n  $rationale' : '';
+    return '$time | $stateTransition\n  $action$rationaleText';
+  }
+}
+
 /// State machine status for experience generation.
 /// See docs/Experience Generation.md — State Machine.
 enum ExperienceGenerationStatus {
@@ -86,6 +113,30 @@ class ExperienceGenerationProcess extends ChangeNotifier {
   }
 
   String? failureReason;
+
+  // --- Rationale & Action Log ---
+  String? _currentRationale;
+  String? get currentRationale => _currentRationale;
+  set currentRationale(String? r) {
+    _currentRationale = r;
+    notifyListeners();
+  }
+
+  final List<LogEntry> _actionLog = [];
+  List<LogEntry> get actionLog => List.unmodifiable(_actionLog);
+
+  /// Adds an entry to the action log.
+  void addLogEntry(String fromState, String toState, String action, [String? rationale]) {
+    _actionLog.add(LogEntry(
+      timestamp: DateTime.now(),
+      fromState: fromState,
+      toState: toState,
+      action: action,
+      rationale: rationale,
+    ));
+    _currentRationale = rationale;
+    notifyListeners();
+  }
 
   bool get isTerminal =>
       _status == ExperienceGenerationStatus.complete ||

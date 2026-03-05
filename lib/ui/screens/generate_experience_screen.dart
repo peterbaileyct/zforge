@@ -147,9 +147,51 @@ class _GenerateExperienceScreenState extends State<GenerateExperienceScreen> {
                       color: failed
                           ? Theme.of(context).colorScheme.error
                           : null,
+                      fontWeight: FontWeight.bold,
                     ),
               ),
-              const SizedBox(height: 12),
+              if (_process?.currentRationale != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  _process!.currentRationale!,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        fontStyle: FontStyle.italic,
+                      ),
+                ),
+              ],
+              const SizedBox(height: 16),
+              if (_process != null && _process!.actionLog.isNotEmpty) ...[
+                Text(
+                  'Action Log',
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: Container(
+                    decoration: BoxDecoration(
+                      border: Border.all(
+                        color: Theme.of(context).colorScheme.outline,
+                      ),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    padding: const EdgeInsets.all(12),
+                    child: ListView.separated(
+                      itemCount: _process!.actionLog.length,
+                      separatorBuilder: (_, __) => const Divider(),
+                      itemBuilder: (_, index) {
+                        final entry = _process!.actionLog[index];
+                        return Text(
+                          entry.toString(),
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                fontFamily: 'monospace',
+                              ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
               if (failed)
                 Text(
                   _process?.failureReason ?? 'Unknown error.',

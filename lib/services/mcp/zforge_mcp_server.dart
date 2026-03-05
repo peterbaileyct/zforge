@@ -153,6 +153,11 @@ class ZForgeMcpServer {
               'Tech Notes documenting intentional logical exceptions, '
               'or "No special technical exceptions".',
         },
+        'rationale': {
+          'type': 'string',
+          'description':
+              'Explain what you did and why. Describe your creative decisions and how they align with the inputs.',
+        },
       },
     },
   );
@@ -164,7 +169,13 @@ class ZForgeMcpServer {
         'Call this when the Outline is acceptable.',
     parametersSchema: {
       'type': 'object',
-      'properties': {},
+      'properties': {
+        'rationale': {
+          'type': 'string',
+          'description':
+              'Explain why you approve this outline and what makes it suitable and feasible.',
+        },
+      },
     },
   );
 
@@ -180,6 +191,11 @@ class ZForgeMcpServer {
         'outline_notes': {
           'type': 'string',
           'description': 'Feedback on why the Outline is not suitable.',
+        },
+        'rationale': {
+          'type': 'string',
+          'description':
+              'Explain your decision to reject and the key problems you identified.',
         },
       },
     },
@@ -198,6 +214,11 @@ class ZForgeMcpServer {
           'type': 'string',
           'description': 'The complete script in the IF engine\'s language.',
         },
+        'rationale': {
+          'type': 'string',
+          'description':
+              'Explain your approach to implementing the outline and any key decisions you made.',
+        },
       },
     },
   );
@@ -208,7 +229,13 @@ class ZForgeMcpServer {
         'Author approves the Script as faithfully implementing the Outline.',
     parametersSchema: {
       'type': 'object',
-      'properties': {},
+      'properties': {
+        'rationale': {
+          'type': 'string',
+          'description':
+              'Explain why the script faithfully implements your vision and outline.',
+        },
+      },
     },
   );
 
@@ -225,6 +252,11 @@ class ZForgeMcpServer {
           'type': 'string',
           'description': 'Specific feedback on how the Script diverges from the Outline.',
         },
+        'rationale': {
+          'type': 'string',
+          'description':
+              'Explain why you reject the script and what key elements diverge from your vision.',
+        },
       },
     },
   );
@@ -235,7 +267,13 @@ class ZForgeMcpServer {
         'Technical Editor approves the Script as logically consistent.',
     parametersSchema: {
       'type': 'object',
-      'properties': {},
+      'properties': {
+        'rationale': {
+          'type': 'string',
+          'description':
+              'Explain why the script is logically consistent and meets technical standards.',
+        },
+      },
     },
   );
 
@@ -251,6 +289,11 @@ class ZForgeMcpServer {
           'type': 'string',
           'description': 'Report detailing logical inconsistencies found.',
         },
+        'rationale': {
+          'type': 'string',
+          'description':
+              'Explain why these logical inconsistencies are problematic and exceed acceptable limits.',
+        },
       },
     },
   );
@@ -261,7 +304,13 @@ class ZForgeMcpServer {
         'Story Editor approves the Script as aligned with player preferences.',
     parametersSchema: {
       'type': 'object',
-      'properties': {},
+      'properties': {
+        'rationale': {
+          'type': 'string',
+          'description':
+              'Explain how the script aligns with player preferences and their prompt.',
+        },
+      },
     },
   );
 
@@ -276,6 +325,11 @@ class ZForgeMcpServer {
         'story_edit_report': {
           'type': 'string',
           'description': 'Report describing preference alignment issues.',
+        },
+        'rationale': {
+          'type': 'string',
+          'description':
+              'Explain why the script doesn\'t match player preferences and what needs to change.',
         },
       },
     },
@@ -295,21 +349,21 @@ class ZForgeMcpServer {
       case 'experience_author_submit_outline':
         return _authorSubmitOutline(args, process);
       case 'experience_scripter_approve_outline':
-        return _scripterApproveOutline(process);
+        return _scripterApproveOutline(args, process);
       case 'experience_scripter_reject_outline':
         return _scripterRejectOutline(args, process);
       case 'experience_scripter_submit_script':
         return await _scripterSubmitScript(args, process, ifEngine);
       case 'experience_author_approve_script':
-        return _authorApproveScript(process);
+        return _authorApproveScript(args, process);
       case 'experience_author_reject_script':
         return _authorRejectScript(args, process);
       case 'experience_techeditor_approve':
-        return _techeditorApprove(process);
+        return _techeditorApprove(args, process);
       case 'experience_techeditor_reject':
         return _techeditorReject(args, process);
       case 'experience_storyeditor_approve':
-        return _storyeditorApprove(process);
+        return _storyeditorApprove(args, process);
       case 'experience_storyeditor_reject':
         return _storyeditorReject(args, process);
       default:
@@ -323,10 +377,18 @@ class ZForgeMcpServer {
     Map<String, dynamic> args,
     ExperienceGenerationProcess p,
   ) {
+    final rationale = args['rationale'] as String?;
     p.outline = args['outline'] as String?;
     p.techNotes = args['tech_notes'] as String?;
     p.statusMessage = 'Author submitted outline';
+    final prevStatus = p.status;
     p.status = ExperienceGenerationStatus.awaitingOutlineReview;
+    p.addLogEntry(
+      prevStatus.name,
+      p.status.name,
+      'Author submitted outline',
+      rationale,
+    );
     return {
       'success': true,
       'statusMessage': p.statusMessage,
@@ -334,9 +396,20 @@ class ZForgeMcpServer {
     };
   }
 
-  Map<String, dynamic> _scripterApproveOutline(ExperienceGenerationProcess p) {
+  Map<String, dynamic> _scripterApproveOutline(
+    Map<String, dynamic> args,
+    ExperienceGenerationProcess p,
+  ) {
+    final rationale = args['rationale'] as String?;
     p.statusMessage = 'Scripter approves outline';
+    final prevStatus = p.status;
     p.status = ExperienceGenerationStatus.awaitingScript;
+    p.addLogEntry(
+      prevStatus.name,
+      p.status.name,
+      'Scripter approved outline',
+      rationale,
+    );
     return {
       'success': true,
       'statusMessage': p.statusMessage,
@@ -348,8 +421,10 @@ class ZForgeMcpServer {
     Map<String, dynamic> args,
     ExperienceGenerationProcess p,
   ) {
+    final rationale = args['rationale'] as String?;
     p.outlineNotes = args['outline_notes'] as String?;
     p.outlineIterations++;
+    final prevStatus = p.status;
     if (p.outlineIterations >= ExperienceGenerationProcess.maxIterations) {
       p.failureReason =
           'Failed to produce an acceptable outline after '
@@ -361,6 +436,12 @@ class ZForgeMcpServer {
           '(attempt ${p.outlineIterations}/${ExperienceGenerationProcess.maxIterations})';
       p.status = ExperienceGenerationStatus.awaitingOutlineRevision;
     }
+    p.addLogEntry(
+      prevStatus.name,
+      p.status.name,
+      'Scripter rejected outline',
+      rationale,
+    );
     return {
       'success': p.status != ExperienceGenerationStatus.failed,
       'statusMessage': p.statusMessage,
@@ -375,7 +456,9 @@ class ZForgeMcpServer {
     ExperienceGenerationProcess p,
     IfEngineConnector ifEngine,
   ) async {
+    final rationale = args['rationale'] as String?;
     p.script = args['script'] as String?;
+    final prevStatus = p.status;
     p.statusMessage = 'Compiling script…';
     p.status = p.status; // trigger notifyListeners via setter
 
@@ -393,6 +476,12 @@ class ZForgeMcpServer {
         p.statusMessage = 'Script is empty — Scripter must retry';
         p.status = ExperienceGenerationStatus.awaitingScriptFix;
       }
+      p.addLogEntry(
+        prevStatus.name,
+        p.status.name,
+        'Script submission failed: empty script',
+        rationale,
+      );
       return {
         'success': false,
         'statusMessage': p.statusMessage,
@@ -423,6 +512,12 @@ class ZForgeMcpServer {
       } else {
         p.status = ExperienceGenerationStatus.awaitingAuthorReview;
       }
+      p.addLogEntry(
+        prevStatus.name,
+        p.status.name,
+        'Scripter submitted script - compiled successfully',
+        rationale,
+      );
       return {
         'success': true,
         'statusMessage': p.statusMessage,
@@ -444,6 +539,12 @@ class ZForgeMcpServer {
             '(attempt ${p.scriptCompileIterations}/${ExperienceGenerationProcess.maxIterations})';
         p.status = ExperienceGenerationStatus.awaitingScriptFix;
       }
+      p.addLogEntry(
+        prevStatus.name,
+        p.status.name,
+        'Script compilation failed',
+        rationale,
+      );
       return {
         'success': false,
         'statusMessage': p.statusMessage,
@@ -456,11 +557,22 @@ class ZForgeMcpServer {
     }
   }
 
-  Map<String, dynamic> _authorApproveScript(ExperienceGenerationProcess p) {
+  Map<String, dynamic> _authorApproveScript(
+    Map<String, dynamic> args,
+    ExperienceGenerationProcess p,
+  ) {
+    final rationale = args['rationale'] as String?;
     p.statusMessage = 'Author approves script';
+    final prevStatus = p.status;
     p.status = p.preferences.logicalVsMood > 5
         ? ExperienceGenerationStatus.awaitingTechEdit
         : ExperienceGenerationStatus.awaitingStoryEdit;
+    p.addLogEntry(
+      prevStatus.name,
+      p.status.name,
+      'Author approved script',
+      rationale,
+    );
     return {
       'success': true,
       'statusMessage': p.statusMessage,
@@ -472,8 +584,10 @@ class ZForgeMcpServer {
     Map<String, dynamic> args,
     ExperienceGenerationProcess p,
   ) {
+    final rationale = args['rationale'] as String?;
     p.scriptNotes = args['script_notes'] as String?;
     p.authorReviewIterations++;
+    final prevStatus = p.status;
     if (p.authorReviewIterations >=
         ExperienceGenerationProcess.maxIterations) {
       p.failureReason =
@@ -485,6 +599,12 @@ class ZForgeMcpServer {
           '(attempt ${p.authorReviewIterations}/${ExperienceGenerationProcess.maxIterations})';
       p.status = ExperienceGenerationStatus.awaitingScriptRevision;
     }
+    p.addLogEntry(
+      prevStatus.name,
+      p.status.name,
+      'Author rejected script',
+      rationale,
+    );
     return {
       'success': p.status != ExperienceGenerationStatus.failed,
       'statusMessage': p.statusMessage,
@@ -494,8 +614,13 @@ class ZForgeMcpServer {
     };
   }
 
-  Map<String, dynamic> _techeditorApprove(ExperienceGenerationProcess p) {
+  Map<String, dynamic> _techeditorApprove(
+    Map<String, dynamic> args,
+    ExperienceGenerationProcess p,
+  ) {
+    final rationale = args['rationale'] as String?;
     p.statusMessage = 'Technical Editor approves';
+    final prevStatus = p.status;
     // If story editing hasn't passed yet (or we're tech-first and haven't done story yet)
     if (p.storyEditIterations == 0 && p.status == ExperienceGenerationStatus.awaitingTechEdit) {
       // If tech was first, proceed to story
@@ -508,6 +633,12 @@ class ZForgeMcpServer {
     } else {
       p.status = ExperienceGenerationStatus.complete;
     }
+    p.addLogEntry(
+      prevStatus.name,
+      p.status.name,
+      'Technical Editor approved script',
+      rationale,
+    );
     return {
       'success': true,
       'statusMessage': p.statusMessage,
@@ -519,8 +650,10 @@ class ZForgeMcpServer {
     Map<String, dynamic> args,
     ExperienceGenerationProcess p,
   ) {
+    final rationale = args['rationale'] as String?;
     p.techEditReport = args['tech_edit_report'] as String?;
     p.techEditIterations++;
+    final prevStatus = p.status;
     if (p.techEditIterations >= ExperienceGenerationProcess.maxIterations) {
       p.failureReason =
           'Technical Editor rejected the script '
@@ -532,6 +665,12 @@ class ZForgeMcpServer {
           '(attempt ${p.techEditIterations}/${ExperienceGenerationProcess.maxIterations})';
       p.status = ExperienceGenerationStatus.awaitingTechFix;
     }
+    p.addLogEntry(
+      prevStatus.name,
+      p.status.name,
+      'Technical Editor rejected script',
+      rationale,
+    );
     return {
       'success': p.status != ExperienceGenerationStatus.failed,
       'statusMessage': p.statusMessage,
@@ -541,8 +680,13 @@ class ZForgeMcpServer {
     };
   }
 
-  Map<String, dynamic> _storyeditorApprove(ExperienceGenerationProcess p) {
+  Map<String, dynamic> _storyeditorApprove(
+    Map<String, dynamic> args,
+    ExperienceGenerationProcess p,
+  ) {
+    final rationale = args['rationale'] as String?;
     p.statusMessage = 'Story Editor approves';
+    final prevStatus = p.status;
     // If tech editing hasn't passed yet
     if (p.techEditIterations == 0 && p.status == ExperienceGenerationStatus.awaitingStoryEdit) {
       if (p.preferences.logicalVsMood <= 5) {
@@ -555,6 +699,12 @@ class ZForgeMcpServer {
     } else {
       p.status = ExperienceGenerationStatus.complete;
     }
+    p.addLogEntry(
+      prevStatus.name,
+      p.status.name,
+      'Story Editor approved script',
+      rationale,
+    );
     return {
       'success': true,
       'statusMessage': p.statusMessage,
@@ -566,8 +716,10 @@ class ZForgeMcpServer {
     Map<String, dynamic> args,
     ExperienceGenerationProcess p,
   ) {
+    final rationale = args['rationale'] as String?;
     p.storyEditReport = args['story_edit_report'] as String?;
     p.storyEditIterations++;
+    final prevStatus = p.status;
     if (p.storyEditIterations >= ExperienceGenerationProcess.maxIterations) {
       p.failureReason =
           'Story Editor rejected the script '
@@ -579,6 +731,12 @@ class ZForgeMcpServer {
           '(attempt ${p.storyEditIterations}/${ExperienceGenerationProcess.maxIterations})';
       p.status = ExperienceGenerationStatus.awaitingStoryFix;
     }
+    p.addLogEntry(
+      prevStatus.name,
+      p.status.name,
+      'Story Editor rejected script',
+      rationale,
+    );
     return {
       'success': p.status != ExperienceGenerationStatus.failed,
       'statusMessage': p.statusMessage,
