@@ -114,10 +114,10 @@ erDiagram
 ```
 
 ## Notes
-- `.zworld` files are JSON representations of `ZWorld`, stored locally by `ZWorldManager` (`lib/services/managers/zworld_manager.dart`).
-- `Experience` objects are managed by `ExperienceManager` (`lib/services/managers/experience_manager.dart`), stored as compiled `.ink.json` files under the experience folder.
-- `ZForgeConfig` is persisted via `ConfigService` (`lib/services/config_service.dart`) using `shared_preferences`.
-- `ZForgeSecureConfig` is persisted via `SecureConfigService` (`lib/services/secure_config_service.dart`) using `flutter_secure_storage`.
-- `ExperienceGenerationProcess` (`lib/processes/experience_generation_process.dart`) drives the multi-agent LLM workflow for experience creation.
-- `CreateWorldProcess` (`lib/processes/create_world_process.dart`) drives the LLM workflow for world creation.
-- IF engine abstraction: `IfEngineConnector` (`lib/services/if_engine/if_engine_connector.dart`) with ink implementation (`lib/services/if_engine/ink_engine_connector.dart`).
+- `.zworld` files are JSON representations of `ZWorld`, stored locally by `ZWorldManager` (`src/zforge/managers/zworld_manager.py`).
+- `Experience` objects are managed by `ExperienceManager` (`src/zforge/managers/experience_manager.py`), stored as compiled `.ink.json` files under the experience folder.
+- `ZForgeConfig` is persisted via `ConfigService` (`src/zforge/services/config_service.py`) using `platformdirs` JSON file storage.
+- `ZForgeSecureConfig` is persisted via `SecureConfigService` (`src/zforge/services/secure_config_service.py`) using `keyring`.
+- `ExperienceGenerationState` (`src/zforge/graphs/state.py`) is the LangGraph TypedDict that drives the multi-agent LLM workflow for experience creation.
+- `CreateWorldState` (`src/zforge/graphs/state.py`) is the LangGraph TypedDict that drives the LLM workflow for world creation.
+- IF engine abstraction: `IfEngineConnector` (`src/zforge/services/if_engine/if_engine_connector.py`) with ink implementation (`src/zforge/services/if_engine/ink_engine_connector.py`).

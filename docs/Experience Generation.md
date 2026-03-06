@@ -1,73 +1,76 @@
 # Experience Generation
-Experiences are generated as scripts in an interactive fiction (IF) engine's language, compiled, and run through the [IF Engine Abstraction Layer](IF%20Engine%20Abstraction%20Layer.md). The current primary engine is ink (compiled via inkjs through flutter_js, run via the ink_runtime Dart package), but the abstraction layer allows for future support of additional engines. TODO: Pictures and possibly sounds. This is accomplished by a team of LLM agents whose actions are connected by tools chained through an MCP server. The system prompt for each agent makes it aware of the team structure and process, but makes it responsible for its individual contributions.
+Experiences are generated as scripts in an interactive fiction (IF) engine's language, compiled, and run through the [IF Engine Abstraction Layer](IF%20Engine%20Abstraction%20Layer.md). The current primary engine is ink (compiled via inkjs through a Python JS bridge, run via the same bridge), but the abstraction layer allows for future support of additional engines. TODO: Pictures and possibly sounds. This is accomplished by a team of LLM agents whose actions are orchestrated by a [LangGraph](https://langchain-ai.github.io/langgraph/) `StateGraph`. The system prompt for each agent makes it aware of the team structure and process, but makes it responsible for its individual contributions.
 
 ## Technical Architecture
-An ExperienceGenerationProcess object tracks current state, e.g. the inputs, artifacts, number of iterations through each possible loop, etc. This is held by the ZForgeManager. Each step of the process is executed by tool calls from the configured LLM, fed through the MCP server in order to modify the state of the ExperienceGenerationProcess. Compilation and playback are handled through the configured IfEngineConnector (see [IF Engine Abstraction Layer](IF%20Engine%20Abstraction%20Layer.md)).
+An `ExperienceGenerationState` TypedDict holds current state (inputs, artifacts, iteration counters, status). This is the LangGraph graph state for the experience generation graph, held and streamed by `ZForgeManager`. Each step of the process is executed by LangGraph `@tool` functions invoked through the graph's `ToolNode`. Compilation and playback are handled through the configured `IfEngineConnector` (see [IF Engine Abstraction Layer](IF%20Engine%20Abstraction%20Layer.md)).
 
-### ExperienceGenerationProcess State Machine
-The process tracks its current state via a `status` enum with the following values:
-- `awaitingOutline` — Initial state; waiting for Author to submit Outline and Tech Notes
-- `awaitingOutlineReview` — Scripter is reviewing the Outline for feasibility
-- `awaitingOutlineRevision` — Author is revising Outline based on Scripter feedback
-- `awaitingScript` — Scripter is writing the Script
-- `awaitingScriptFix` — Scripter is fixing compiler errors
-- `awaitingAuthorReview` — Author is reviewing Script against Outline
-- `awaitingScriptRevision` — Scripter is revising Script based on Author's Script Notes
-- `awaitingTechEdit` — Technical Editor is reviewing Script
-- `awaitingTechFix` — Scripter is fixing logical inconsistencies
-- `awaitingStoryEdit` — Story Editor is reviewing Script
-- `awaitingStoryFix` — Scripter is modifying Script for preference alignment
-- `complete` — Process finished successfully
-- `failed` — Process failed after exhausting retry attempts
+See [LLM Orchestration](LLM%20Orchestration.md) for full graph structure and routing logic.
 
-### ExperienceGenerationProcess Properties
-The implementation agent should define the Process class with these properties:
+### ExperienceGenerationState Status Values
+The state's `status` field (a `str`) takes the following values:
+- `"awaiting_outline"` — Initial state; waiting for Author to submit Outline and Tech Notes
+- `"awaiting_outline_review"` — Scripter is reviewing the Outline for feasibility
+- `"awaiting_outline_revision"` — Author is revising Outline based on Scripter feedback
+- `"awaiting_script"` — Scripter is writing the Script
+- `"awaiting_script_fix"` — Scripter is fixing compiler errors
+- `"awaiting_author_review"` — Author is reviewing Script against Outline
+- `"awaiting_script_revision"` — Scripter is revising Script based on Author's Script Notes
+- `"awaiting_tech_edit"` — Technical Editor is reviewing Script
+- `"awaiting_tech_fix"` — Scripter is fixing logical inconsistencies
+- `"awaiting_story_edit"` — Story Editor is reviewing Script
+- `"awaiting_story_fix"` — Scripter is modifying Script for preference alignment
+- `"complete"` — Process finished successfully
+- `"failed"` — Process failed after exhausting retry attempts
+
+### ExperienceGenerationState Properties
+The implementation agent should define the state `TypedDict` with these fields:
 - **Inputs** (set at initialization):
-  - `zWorld`: ZWorld — the world for this experience
-  - `preferences`: PlayerPreferences — the player's preferences
-  - `playerPrompt`: String? — optional specific request
-- **Artifacts** (set by MCP tools during execution):
-  - `outline`: String? — the Author's story outline
-  - `techNotes`: String? — the Author's technical exceptions
-  - `outlineNotes`: String? — Scripter's feedback on Outline
-  - `script`: String? — the current Script
-  - `scriptNotes`: String? — Author's feedback on Script
-  - `techEditReport`: String? — Technical Editor's report
-  - `storyEditReport`: String? — Story Editor's report
-  - `compiledOutput`: Uint8List? — compiled experience from IfEngineConnector
-  - `compilerErrors`: List<String>? — errors from last compilation attempt
-- **Iteration Counters**:
-  - `outlineIterations`: int — attempts at Outline approval (max 5)
-  - `scriptCompileIterations`: int — attempts at successful compilation (max 5)
-  - `authorReviewIterations`: int — attempts at Author approval (max 5)
-  - `techEditIterations`: int — attempts at Tech Editor approval (max 5)
-  - `storyEditIterations`: int — attempts at Story Editor approval (max 5)
+  - `z_world`: dict — the world for this experience (ZWorld as JSON-serializable dict)
+  - `preferences`: dict — the player's preferences
+  - `player_prompt`: str | None — optional specific request
+- **Artifacts** (set by `@tool` functions during execution):
+  - `outline`: str | None — the Author's story outline
+  - `tech_notes`: str | None — the Author's technical exceptions
+  - `outline_notes`: str | None — Scripter's feedback on Outline
+  - `script`: str | None — the current Script
+  - `script_notes`: str | None — Author's feedback on Script
+  - `tech_edit_report`: str | None — Technical Editor's report
+  - `story_edit_report`: str | None — Story Editor's report
+  - `compiled_output`: bytes | None — compiled experience from IfEngineConnector
+  - `compiler_errors`: list[str] — errors from last compilation attempt
+- **Iteration Counters** (use `Annotated[int, operator.add]` as the LangGraph reducer so tools can return `1` to increment):
+  - `outline_iterations`: Annotated[int, operator.add] — attempts at Outline approval (max 5)
+  - `script_compile_iterations`: Annotated[int, operator.add] — attempts at successful compilation (max 5)
+  - `author_review_iterations`: Annotated[int, operator.add] — attempts at Author approval (max 5)
+  - `tech_edit_iterations`: Annotated[int, operator.add] — attempts at Tech Editor approval (max 5)
+  - `story_edit_iterations`: Annotated[int, operator.add] — attempts at Story Editor approval (max 5)
 - **Status**:
-  - `status`: ExperienceGenerationStatus — current state (see enum above)
-  - `statusMessage`: String — human-readable description of current step for UI display (e.g., "Scripter approves outline", "Compiling script...")
-  - `failureReason`: String? — explanation if status is `failed` (e.g., "Failed to generate a compileable script after five tries. Giving up.")
+  - `status`: str — current state (see values above)
+  - `status_message`: str — human-readable description of current step for UI display
+  - `failure_reason`: str | None — explanation if status is `"failed"`
+  - `messages`: Annotated[list, add_messages] — LangGraph message history; **must** use the `add_messages` reducer from `langgraph.graph.message` so agent responses are appended rather than overwritten
 
-### MCP Tool Derivation
-Per [Managers, Processes, and MCP Server](Managers,%20Processes,%20and%20MCP%20Server.md), implementation agents derive MCP tools from this specification. Each tool corresponds to a decision point where an agent completes work and the process advances. Tools bundle artifact submission with any automated validation. 
+### LangGraph Tool Derivation
+Per [Managers, Processes, and MCP Server](Managers,%20Processes,%20and%20MCP%20Server.md), implementation agents derive `@tool` functions from this specification. Each tool corresponds to a decision point where an agent completes work and the graph advances. Tools bundle artifact submission with any automated validation. 
 
-Each tool must also set `statusMessage` to a human-readable description of what just happened (e.g., "Scripter approves outline", "Script compiled successfully", "Technical Editor found 3 issues").
+Each tool must also set `status_message` to a human-readable description of what just happened (e.g., "Scripter approves outline", "Script compiled successfully", "Technical Editor found 3 issues").
 
-Example tools for this process:
+Example `@tool` functions for this process:
 
-| Tool | Called By | Accepts | Performs | Sets statusMessage | Advances To |
+| Tool | Called By | Accepts | Performs | Sets status_message | Advances To |
 |------|-----------|---------|----------|-------------------|-------------|
-| `experience_author_submit_outline` | Author | outline, techNotes | Stores artifacts | "Author submitted outline" | `awaitingOutlineReview` |
-| `experience_scripter_approve_outline` | Scripter | (none) | — | "Scripter approves outline" | `awaitingScript` |
-| `experience_scripter_reject_outline` | Scripter | outlineNotes | Stores feedback, increments counter | "Scripter requests outline revision" | `awaitingOutlineRevision` or `failed` |
-| `experience_scripter_submit_script` | Scripter | script | Stores script, invokes `IfEngineConnector.build()` | "Compiling script..." then "Script compiled" or "Compilation failed" | `awaitingAuthorReview` (success) or `awaitingScriptFix` (errors) |
-| `experience_author_approve_script` | Author | (none) | — | "Author approves script" | `awaitingTechEdit` or `awaitingStoryEdit` (per preferences) |
-| `experience_author_reject_script` | Author | scriptNotes | Stores feedback, increments counter | "Author requests script revision" | `awaitingScriptRevision` or `failed` |
-| `experience_techeditor_approve` | Tech Editor | (none) | — | "Technical Editor approves" | `awaitingStoryEdit` or `complete` |
-| `experience_techeditor_reject` | Tech Editor | techEditReport | Stores report, increments counter | "Technical Editor found issues" | `awaitingTechFix` or `failed` |
-| `experience_storyeditor_approve` | Story Editor | (none) | — | "Story Editor approves" | `awaitingTechEdit` or `complete` |
-| `experience_storyeditor_reject` | Story Editor | storyEditReport | Stores report, increments counter | "Story Editor requests changes" | `awaitingStoryFix` or `failed` |
+| `experience_author_submit_outline` | Author | outline, tech_notes | Stores artifacts | "Author submitted outline" | `awaiting_outline_review` |
+| `experience_scripter_approve_outline` | Scripter | (none) | — | "Scripter approves outline" | `awaiting_script` |
+| `experience_scripter_reject_outline` | Scripter | outline_notes | Stores feedback, increments counter | "Scripter requests outline revision" | `awaiting_outline_revision` or `failed` |
+| `experience_scripter_submit_script` | Scripter | script | Invokes `IfEngineConnector.build()` | "Compiling script..." then "Script compiled" or "Compilation failed" | `awaiting_author_review` (success) or `awaiting_script_fix` (errors) |
+| `experience_author_approve_script` | Author | (none) | — | "Author approves script" | `awaiting_tech_edit` or `awaiting_story_edit` (per preferences) |
+| `experience_author_reject_script` | Author | script_notes | Stores feedback, increments counter | "Author requests script revision" | `awaiting_script_revision` or `failed` |
+| `experience_techeditor_approve` | Tech Editor | (none) | — | "Technical Editor approves" | `awaiting_story_edit` or `complete` |
+| `experience_techeditor_reject` | Tech Editor | tech_edit_report | Stores report, increments counter | "Technical Editor found issues" | `awaiting_tech_fix` or `failed` |
+| `experience_storyeditor_approve` | Story Editor | (none) | — | "Story Editor approves" | `awaiting_tech_edit` or `complete` |
+| `experience_storyeditor_reject` | Story Editor | story_edit_report | Stores report, increments counter | "Story Editor requests changes" | `awaiting_story_fix` or `failed` |
 
-The tool's return value includes all inputs needed by the next agent (e.g., `experience_scripter_submit_script` returns compiler errors on failure, or the Outline for Author review on success).
+Note: `@tool` functions return a dict of state field updates. The LangGraph `ToolNode` merges these into the graph state; the `route_after_tool` conditional edge then reads the new `status` to determine the next node.
 
 ## Inputs and artifacts
 The generation is kicked off by a set of inputs, with some steps by some agents producing artifacts consumed by downstream steps/agents. When an agent receives an input in a format specific to ZForge, a description of that input format will be provided as a separate system prompt that indicates it describes that format and includes the specification in the equivalent spec file; e.g. when the Author receives the ZWorld, they also receive a prompt that includes the contents of ZWorld.md and explains that this is a description of the ZWorld format. Any inputs and artifacts whose format is not thus structured, and that don't have a specific structure that is not specific to Z-Forge (e.g. the ink script), are in plain text format as if being exchanged between humans or LLM agents for natural-language communication.

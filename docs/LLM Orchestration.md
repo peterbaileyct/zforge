@@ -1,209 +1,207 @@
 # LLM Orchestration
 
-This document describes how the LLM, MCP Server, and ZForgeManager work together to drive multi-step processes like World Generation and Experience Generation.
+This document describes how [LangGraph](https://langchain-ai.github.io/langgraph/) drives the multi-step orchestration of World Generation and Experience Generation in Z-Forge.
 
 ## Overview
 
-Z-Forge processes (e.g., `CreateWorldProcess`, `ExperienceGenerationProcess`) are orchestrated by a loop that:
-1. Determines which agent should act based on the current process state
-2. Constructs the appropriate system prompt and action prompt for that agent
-3. Calls the LLM with a specific tool the agent should invoke
-4. Receives the tool call and dispatches it to the MCP server
-5. The MCP tool updates process state and returns results
-6. The loop repeats until the process reaches `complete` or `failed`
+Each Z-Forge process (e.g., `create_world_graph`, `experience_generation_graph`) is implemented as a LangGraph `StateGraph`. The graph:
+
+1. Holds all process state in a typed `TypedDict` (inputs, artifacts, counters, status)
+2. Routes between named **nodes** (one per agent role or automated step)
+3. Uses **conditional edges** to implement approve/reject/retry logic
+4. Calls agent nodes by invoking the configured `LlmConnector.get_model()` bound to the relevant tools
+5. Executes tool calls via LangGraph's `ToolNode`, which dispatches to Python `@tool` functions that update graph state
+6. Terminates when the state's `status` field reaches `"complete"` or `"failed"`
+
+This replaces the former hand-written orchestration loop. LangGraph handles retry routing, state persistence, and tool dispatch natively.
 
 ## Orchestration Components
 
 ### ZForgeManager
 The `ZForgeManager` is the central coordinator. It:
-- Holds the current process instance (e.g., `currentExperienceProcess`)
-- Provides the `runProcess()` method that executes the orchestration loop
-- Exposes process state to the UI for progress display
+- Holds singleton instances of `ZWorldManager` and `ExperienceManager`
+- Constructs and invokes LangGraph graphs via `run_process(graph, state)`
+- Exposes `asyncio`-based callbacks/events to the UI for progress updates
 
 ### LlmConnector
-The configured `LlmConnector` (e.g., `OpenAiConnector`) handles LLM communication:
-- Receives system prompt, action prompt, and tool specification
-- Returns tool calls from the LLM
-- Does **not** maintain conversation history (stateless)
+The configured `LlmConnector` (see [LLM Abstraction Layer](LLM%20Abstraction%20Layer.md)) provides a LangChain `BaseChatModel` via `get_model()`. This model is bound to the relevant tools for each graph node:
 
-### ZForgeMcpServer
-The `ZForgeMcpServer` dispatches tool calls to the appropriate handler:
-- Maps tool names to handler functions
-- Handlers update process state and return results
-- Tool return values include everything needed for the next step
-
-## Orchestration Loop
-
-```dart
-// Conceptual implementation in ZForgeManager
-Future<void> runProcess(Process process) async {
-  while (process.status != ProcessStatus.complete && 
-         process.status != ProcessStatus.failed) {
-    
-    // 1. Determine next agent and build prompts
-    final orchestrationStep = _buildOrchestrationStep(process);
-    
-    // 2. Call LLM with appropriate prompts and tool
-    final toolCall = await _llmConnector.execute(
-      systemPrompt: orchestrationStep.systemPrompt,
-      actionPrompt: orchestrationStep.actionPrompt,
-      tool: orchestrationStep.tool,
-    );
-    
-    // 3. Dispatch tool call to MCP server
-    final result = await _mcpServer.dispatch(toolCall);
-    
-    // 4. Process state is updated by the tool handler
-    // Loop continues with new state
-  }
-}
+```python
+model = llm_connector.get_model()
+# Bind specific tools for this node
+agent_runnable = model.bind_tools([submit_outline_tool])
 ```
 
-## Building Orchestration Steps
+### Tool Functions
+Tools are plain Python functions decorated with `@tool` (from `langchain_core.tools`). Each tool:
+- Accepts the artifacts produced by the agent at that step
+- Performs any automated validation (e.g., ink compilation)
+- Returns an updated partial state dict for LangGraph to merge into the graph state
 
-For each process state, the orchestrator must determine:
-- **Which agent** should act (Author, Scripter, Tech Editor, Story Editor, etc.)
-- **What system prompt** to provide (role + context + artifacts)
-- **What action prompt** to provide (specific instruction)
-- **Which tool** to offer (the decision the agent will make)
+See [Managers, Processes, and MCP Server](Managers,%20Processes,%20and%20MCP%20Server.md) for tool naming conventions and schema standards.
 
-### Example: Experience Generation Orchestration
+## LangGraph Graph Structure
 
-| Process Status | Agent | System Prompt Includes | Action Prompt | Tool |
-|----------------|-------|------------------------|---------------|------|
-| `awaitingOutline` | Author | Role prompt + ZWorld + ZWorld Format + Preferences + Player Prompt | "Create an Outline and Tech Notes for this experience." | `experience_author_submit_outline` |
-| `awaitingOutlineReview` | Scripter | Role prompt + Engine prompt + Outline + Tech Notes + Preferences | "Evaluate whether this Outline is suitable. Approve or provide feedback." | `experience_scripter_approve_outline` or `experience_scripter_reject_outline` |
-| `awaitingOutlineRevision` | Author | Role prompt + ZWorld + Preferences + Previous Outline + Outline Notes | "Revise your Outline based on the Scripter's feedback." | `experience_author_submit_outline` |
-| `awaitingScript` | Scripter | Role prompt + Engine prompt + Script prompt + Outline + Tech Notes | "Write a complete script implementing this Outline." | `experience_scripter_submit_script` |
-| `awaitingScriptFix` | Scripter | Role prompt + Engine prompt + Script prompt + Previous Script + Compiler Errors | "Fix the compilation errors in this script." | `experience_scripter_submit_script` |
-| `awaitingAuthorReview` | Author | Role prompt + Outline + Script | "Review whether this Script faithfully implements your Outline." | `experience_author_approve_script` or `experience_author_reject_script` |
-| `awaitingScriptRevision` | Scripter | Role prompt + Engine prompt + Outline + Script + Script Notes | "Revise the Script based on the Author's feedback." | `experience_scripter_submit_script` |
-| `awaitingTechEdit` | Tech Editor | Role prompt + Script + Tech Notes + Preferences (logical vs mood scale) | "Review this Script for logical consistency." | `experience_techeditor_approve` or `experience_techeditor_reject` |
-| `awaitingTechFix` | Scripter | Role prompt + Engine prompt + Script + Tech Edit Report | "Fix the logical inconsistencies identified in the report." | `experience_scripter_submit_script` |
-| `awaitingStoryEdit` | Story Editor | Role prompt + Script + Preferences + Player Prompt | "Review whether this Script aligns with player preferences." | `experience_storyeditor_approve` or `experience_storyeditor_reject` |
-| `awaitingStoryFix` | Scripter | Role prompt + Engine prompt + Script + Story Edit Report + Preferences | "Modify the Script to better align with player preferences." | `experience_scripter_submit_script` |
+Each process is a `StateGraph` with the following pattern:
 
-### Example: World Generation Orchestration
-
-| Process Status | Agent | System Prompt Includes | Action Prompt | Tool |
-|----------------|-------|------------------------|---------------|------|
-| `awaitingValidation` | Editor | Role prompt (literature editor) + Input text | "Determine if this is a valid world description." | `world_validate_input` |
-| `awaitingGeneration` | Designer | Role prompt (IF designer) + ZWorld Format + Input text | "Create a ZWorld from this description." | `world_create_zworld` |
-
-## System Prompt Construction
-
-System prompts are constructed dynamically based on:
-1. **Role prompt**: The agent's role (from Experience Generation.md or World Generation.md)
-2. **Format specs**: When passing structured data (e.g., ZWorld), include the spec file contents
-3. **Artifacts**: Current process artifacts relevant to this step
-4. **Engine context**: For Scripter, include engine name and script prompt from `IfEngineConnector`
-
-```dart
-String buildSystemPrompt(Process process, AgentRole role) {
-  final buffer = StringBuffer();
-  
-  // Add role prompt
-  buffer.writeln(getPromptForRole(role));
-  
-  // Add format specs for structured inputs
-  if (role == AgentRole.author && process.status == awaitingOutline) {
-    buffer.writeln('\n--- ZWorld Format Specification ---');
-    buffer.writeln(zworldFormatSpec);
-  }
-  
-  // Add relevant artifacts
-  buffer.writeln('\n--- Current Inputs ---');
-  if (process.zWorld != null) {
-    buffer.writeln('ZWorld: ${jsonEncode(process.zWorld)}');
-  }
-  if (process.outline != null) {
-    buffer.writeln('Outline: ${process.outline}');
-  }
-  // ... etc
-  
-  // Add engine context for Scripter
-  if (role == AgentRole.scripter) {
-    buffer.writeln('\n--- IF Engine: ${ifEngineConnector.getEngineName()} ---');
-    buffer.writeln(ifEngineConnector.getScriptPrompt());
-  }
-  
-  return buffer.toString();
-}
+```
+[START] → agent_node → tool_node → conditional_edge → [next agent_node | END]
 ```
 
-## Tool Selection Logic
+```python
+from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import ToolNode
 
-When an agent can make multiple decisions (approve/reject), the orchestrator offers **both tools** and lets the LLM choose:
+def build_experience_generation_graph(llm_connector, if_engine_connector):
+    graph = StateGraph(ExperienceGenerationState)
 
-```dart
-// For states where agent can approve or reject
-final tools = [
-  experience_scripter_approve_outline,
-  experience_scripter_reject_outline,
-];
+    graph.add_node("author",       make_author_node(llm_connector))
+    graph.add_node("scripter",     make_scripter_node(llm_connector, if_engine_connector))
+    graph.add_node("tech_editor",  make_tech_editor_node(llm_connector))
+    graph.add_node("story_editor", make_story_editor_node(llm_connector))
+    graph.add_node("tools",        ToolNode(all_experience_tools))
 
-final toolCall = await llmConnector.executeWithTools(
-  systemPrompt: systemPrompt,
-  actionPrompt: actionPrompt,
-  tools: tools,
-);
+    graph.set_entry_point("author")
+    graph.add_edge("author", "tools")
+    graph.add_conditional_edges("tools", route_after_tool, {
+        "author":       "author",
+        "scripter":     "scripter",
+        "tech_editor":  "tech_editor",
+        "story_editor": "story_editor",
+        "end":          END,
+    })
+
+    return graph.compile()
 ```
 
-The LLM's tool choice determines the next state transition.
+### Agent Nodes
+Each agent node builds a `SystemMessage` from graph state and a `HumanMessage` (action prompt), then calls `model.bind_tools(tools).invoke(messages)`. LangGraph automatically routes the resulting tool call to `ToolNode`.
+
+```python
+def make_author_node(llm_connector):
+    model = llm_connector.get_model()
+
+    def author_node(state: ExperienceGenerationState) -> dict:
+        system_prompt = build_author_system_prompt(state)
+        action_prompt = get_action_prompt_for_status(state["status"])
+        response = model.bind_tools(
+            [submit_outline_tool, approve_script_tool, reject_script_tool]
+        ).invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=action_prompt),
+        ])
+        return {"messages": [response]}
+
+    return author_node
+```
+
+### ToolNode and Tool Functions
+
+```python
+from langchain_core.tools import tool
+
+@tool
+def submit_outline(outline: str, tech_notes: str) -> dict:
+    """Author submits the story outline and tech notes."""
+    return {
+        "outline": outline,
+        "tech_notes": tech_notes,
+        "status": "awaiting_outline_review",
+        "status_message": "Author submitted outline",
+    }
+```
+
+### Conditional Edges (Routing)
+
+```python
+def route_after_tool(state: ExperienceGenerationState) -> str:
+    routing = {
+        "awaiting_outline_review":   "scripter",
+        "awaiting_outline_revision": "author",
+        "awaiting_script":           "scripter",
+        "awaiting_script_fix":       "scripter",
+        "awaiting_author_review":    "author",
+        "awaiting_script_revision":  "scripter",
+        "awaiting_tech_edit":        "tech_editor",
+        "awaiting_tech_fix":         "scripter",
+        "awaiting_story_edit":       "story_editor",
+        "awaiting_story_fix":        "scripter",
+        "complete":                  "end",
+        "failed":                    "end",
+    }
+    return routing.get(state["status"], "end")
+```
+
+## Building System Prompts
+
+System prompts are constructed dynamically from graph state. For each node, a `build_{role}_system_prompt(state)` function:
+1. Adds the agent's role prompt (from [Experience Generation](Experience%20Generation.md) or [World Generation](World%20Generation.md))
+2. Appends format specs for structured inputs (e.g., ZWorld format)
+3. Appends relevant artifacts from the current state
+4. Appends engine context for the Scripter (engine name and script prompt from `IfEngineConnector`)
+
+### Experience Generation Orchestration Table
+
+| Process Status | Next Node | Tools Offered |
+|----------------|-----------|---------------|
+| `awaiting_outline` | `author` | `submit_outline` |
+| `awaiting_outline_review` | `scripter` | `approve_outline`, `reject_outline` |
+| `awaiting_outline_revision` | `author` | `submit_outline` |
+| `awaiting_script` | `scripter` | `submit_script` |
+| `awaiting_script_fix` | `scripter` | `submit_script` |
+| `awaiting_author_review` | `author` | `approve_script`, `reject_script` |
+| `awaiting_script_revision` | `scripter` | `submit_script` |
+| `awaiting_tech_edit` | `tech_editor` | `approve_tech`, `reject_tech` |
+| `awaiting_tech_fix` | `scripter` | `submit_script` |
+| `awaiting_story_edit` | `story_editor` | `approve_story`, `reject_story` |
+| `awaiting_story_fix` | `scripter` | `submit_script` |
+
+### World Generation Orchestration Table
+
+| Process Status | Next Node | Tools Offered |
+|----------------|-----------|---------------|
+| `awaiting_validation` | `editor` | `validate_input` |
+| `awaiting_generation` | `designer` | `create_zworld` |
+| `awaiting_rejection_explanation` | `editor` | `explain_rejection` |
+
+
 
 ## Error Handling
 
 ### LLM Errors
-If the LLM call fails (network error, rate limit, etc.):
-- Retry with exponential backoff (3 attempts)
-- On persistent failure, set `process.status = failed` with appropriate `failureReason`
+If the LLM call fails (network error, rate limit, etc.), wrap the node with exponential backoff (3 attempts). On persistent failure, set `status = "failed"` with an appropriate `failure_reason`.
 
 ### Invalid Tool Calls
-If the LLM returns an unexpected tool or malformed arguments:
-- Log the error for debugging
-- Retry the same step (counts against iteration limit)
-- After repeated failures, fail the process
+If the model returns an unexpected tool call or malformed arguments, log the error and retry the step (counting against the iteration limit). After repeated failures, transition to `"failed"`.
 
 ### Iteration Limits
-Each feedback loop has a maximum iteration count (typically 5):
-- Tracked in process properties (e.g., `outlineIterations`)
-- When limit reached, set `process.status = failed`
-- Set `failureReason` to explain what couldn't be resolved
+Each feedback loop has a maximum (typically 5), tracked in the graph state (e.g., `outline_iterations`). When the limit is reached, the tool function sets `status = "failed"` and sets `failure_reason` to an explanatory message.
 
 ## UI Integration
 
-The orchestration loop runs asynchronously. The UI observes process state:
+The LangGraph graph runs asynchronously. `ZForgeManager.run_process()` streams updates to the Toga UI via an `asyncio` callback:
 
-```dart
-// In GenerateExperienceScreen
-StreamBuilder<ExperienceGenerationProcess>(
-  stream: zforgeManager.processStream,
-  builder: (context, snapshot) {
-    final process = snapshot.data;
-    return Column(
-      children: [
-        Text(process?.statusMessage ?? 'Starting...'),
-        if (process?.status == ProcessStatus.failed)
-          Text('Error: ${process.failureReason}'),
-        if (process?.status == ProcessStatus.complete)
-          ElevatedButton(
-            onPressed: () => playExperience(process.compiledOutput),
-            child: Text('Play Now'),
-          ),
-      ],
-    );
-  },
-)
+```python
+async def run_process(self, graph, initial_state, on_status_update):
+    async for chunk in graph.astream(initial_state):
+        for node_output in chunk.values():
+            if "status_message" in node_output:
+                on_status_update(node_output["status_message"])
+    return await graph.ainvoke(initial_state)
 ```
+
+The UI observes `status_message` for progress display and checks `status` for completion or failure.
 
 ## Implementation Files
 
-- `lib/services/managers/zforge_manager.dart` — `ZForgeManager` with `runProcess()` orchestration
-- `lib/services/orchestration/orchestration_step.dart` — `OrchestrationStep` data class
-- `lib/services/orchestration/experience_orchestrator.dart` — Experience-specific prompt building
-- `lib/services/orchestration/world_orchestrator.dart` — World-specific prompt building
-- `lib/services/llm/llm_connector.dart` — `LlmConnector.execute()` and `executeWithTools()`
-- `lib/services/mcp/zforge_mcp_server.dart` — `ZForgeMcpServer.dispatch()`
+- `src/zforge/managers/zforge_manager.py` — `ZForgeManager` with `run_process()`
+- `src/zforge/graphs/experience_generation_graph.py` — LangGraph experience generation graph
+- `src/zforge/graphs/world_creation_graph.py` — LangGraph world creation graph
+- `src/zforge/graphs/state.py` — `ExperienceGenerationState`, `CreateWorldState` TypedDicts
+- `src/zforge/tools/experience_tools.py` — `@tool` functions for experience generation
+- `src/zforge/tools/world_tools.py` — `@tool` functions for world creation
+- `src/zforge/services/llm/llm_connector.py` — `LlmConnector` ABC
+- `src/zforge/services/llm/openai_connector.py` — `OpenAiConnector`
 
 ## Sequence Diagram
 
@@ -211,28 +209,29 @@ StreamBuilder<ExperienceGenerationProcess>(
 sequenceDiagram
     participant UI as GenerateExperienceScreen
     participant ZFM as ZForgeManager
-    participant Orch as Orchestrator
-    participant LLM as LlmConnector
-    participant MCP as ZForgeMcpServer
-    participant Proc as ExperienceGenerationProcess
+    participant G as LangGraph Graph
+    participant Node as Agent Node (e.g. author)
+    participant LLM as LlmConnector (LangChain model)
+    participant TN as ToolNode
+    participant Tool as @tool function
 
-    UI->>ZFM: startExperienceGeneration(zWorld, prefs, prompt)
-    ZFM->>Proc: create(zWorld, prefs, prompt)
-    ZFM->>Orch: runProcess(process)
-    
-    loop Until complete or failed
-        Orch->>Proc: getStatus()
-        Proc-->>Orch: currentStatus
-        Orch->>Orch: buildOrchestrationStep(status)
-        Orch->>LLM: execute(systemPrompt, actionPrompt, tools)
-        LLM-->>Orch: toolCall
-        Orch->>MCP: dispatch(toolCall)
-        MCP->>Proc: updateState(artifacts)
-        Proc-->>MCP: result
-        MCP-->>Orch: toolResult
-        Proc-->>UI: statusMessage updated (via stream)
+    UI->>ZFM: start_experience_generation(z_world, prefs, prompt)
+    ZFM->>G: astream(initial_state)
+
+    loop Until status == complete or failed
+        G->>Node: invoke(state)
+        Node->>Node: build_system_prompt(state)
+        Node->>LLM: model.bind_tools(...).invoke([system_msg, human_msg])
+        LLM-->>Node: AIMessage with tool_call
+        Node-->>G: {"messages": [ai_message]}
+        G->>TN: route to ToolNode
+        TN->>Tool: call @tool function(args)
+        Tool-->>TN: state update dict
+        TN-->>G: merged state update
+        G-->>UI: status_message (via astream chunk)
+        G->>G: route_after_tool(state) -> next node
     end
-    
-    Orch-->>ZFM: processComplete
-    ZFM-->>UI: final status
+
+    G-->>ZFM: final state
+    ZFM-->>UI: complete / failed
 ```

@@ -5,7 +5,7 @@ Z-Forge is an AI-powered tool for creating and running short Interactive Fiction
 ## Features
 - **AI-assisted World Building:** Generate structured world files (.zworld) from plain-text descriptions.
 - **Personalized Scenarios:** Cross-reference player preferences and prompts to create unique IF experiences.
-- **ink Engine Integration:** Compile and play games using inkjs (via flutter_js) and ink_runtime with a streamlined, typewriter-style interface.
+- **ink Engine Integration:** Compile and play games using inkjs (via a JavaScript bridge) with a streamlined, typewriter-style interface.
 - **Flexible Preferences:** Set preferences directly or via a quiz inspired by classic IF games.
 - **Save/Load Support:** Save and resume progress across platforms.
 
@@ -16,22 +16,22 @@ Z-Forge is an AI-powered tool for creating and running short Interactive Fiction
 4. **Generate & Play:** Z-Forge creates a playable IF experience, which you can play immediately.
 
 ## Framework
-Z-Forge uses Flutter for a cross-platform UI (iOS, Android, PC, MacOS, Web), inkjs (via flutter_js) for compiling ink scripts, and ink_runtime for playing experiences.
+Z-Forge uses [BeeWare](https://beeware.org/) (Toga widget toolkit) for a cross-platform UI (iOS, Android, PC, macOS, Web), Python for all application logic, [LangGraph](https://langchain-ai.github.io/langgraph/) for LLM orchestration, and inkjs (via a Python JS bridge) for compiling and running ink experiences. Project configuration is managed via `pyproject.toml`.
 
 ## Implementation Status
 
 | Feature | Status |
 |---|---|
-| Flutter project scaffold (all platforms) | ✅ Phase 1 |
-| ZWorld data model & file storage | ✅ Phase 1 |
-| LLM Abstraction Layer (OpenAI) | ✅ Phase 1 |
-| MCP Server (`ZForgeMcpServer`) | ✅ Phase 1 |
-| World Creation workflow | ✅ Phase 1 |
-| Player Preferences | ✅ Phase 1 |
-| Home / LLM Config / Preferences screens | ✅ Phase 1 |
-| ink experience generation | ✅ Phase 2 |
-| ink gameplay interface | ✅ Phase 2 |
-| Save/Load progress | ✅ Phase 2 |
+| BeeWare/Toga project scaffold (all platforms) | 🔲 Phase 1 |
+| ZWorld data model & file storage | 🔲 Phase 1 |
+| LLM Abstraction Layer (LangGraph + OpenAI) | 🔲 Phase 1 |
+| LangGraph orchestration graphs | 🔲 Phase 1 |
+| World Creation workflow | 🔲 Phase 1 |
+| Player Preferences | 🔲 Phase 1 |
+| Home / LLM Config / Preferences screens | 🔲 Phase 1 |
+| ink experience generation | 🔲 Phase 2 |
+| ink gameplay interface | 🔲 Phase 2 |
+| Save/Load progress | 🔲 Phase 2 |
 
 ## Documentation
 - [Data Models ER Diagram](docs/ER%20Diagram.md)
