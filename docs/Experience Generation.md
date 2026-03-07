@@ -48,6 +48,8 @@ The implementation agent should define the state `TypedDict` with these fields:
   - `status`: str — current state (see values above)
   - `status_message`: str — human-readable description of current step for UI display
   - `failure_reason`: str | None — explanation if status is `"failed"`
+  - `current_rationale`: str | None — the latest rationale text submitted by the most recent tool call; replaced on each tool call
+  - `action_log`: Annotated[list, operator.add] — append-only log of all completed steps; each entry is a dict with keys `timestamp` (ISO string), `from_status` (str), `to_status` (str), `action` (str), and `rationale` (str). Tools return a single-element list to append one entry.
   - `messages`: Annotated[list, add_messages] — LangGraph message history; **must** use the `add_messages` reducer from `langgraph.graph.message` so agent responses are appended rather than overwritten
 
 ### LangGraph Tool Derivation
@@ -55,22 +57,27 @@ Per [Managers, Processes, and MCP Server](Managers,%20Processes,%20and%20MCP%20S
 
 Each tool must also set `status_message` to a human-readable description of what just happened (e.g., "Scripter approves outline", "Script compiled successfully", "Technical Editor found 3 issues").
 
+Every tool must accept a `rationale: str` parameter — a brief natural-language explanation of why the agent made this decision. This is stored in `current_rationale` (replacing the previous value) and appended to `action_log`. The agent should be instructed to populate this honestly and concisely.
+
 Example `@tool` functions for this process:
 
 | Tool | Called By | Accepts | Performs | Sets status_message | Advances To |
 |------|-----------|---------|----------|-------------------|-------------|
-| `experience_author_submit_outline` | Author | outline, tech_notes | Stores artifacts | "Author submitted outline" | `awaiting_outline_review` |
-| `experience_scripter_approve_outline` | Scripter | (none) | — | "Scripter approves outline" | `awaiting_script` |
-| `experience_scripter_reject_outline` | Scripter | outline_notes | Stores feedback, increments counter | "Scripter requests outline revision" | `awaiting_outline_revision` or `failed` |
-| `experience_scripter_submit_script` | Scripter | script | Invokes `IfEngineConnector.build()` | "Compiling script..." then "Script compiled" or "Compilation failed" | `awaiting_author_review` (success) or `awaiting_script_fix` (errors) |
-| `experience_author_approve_script` | Author | (none) | — | "Author approves script" | `awaiting_tech_edit` or `awaiting_story_edit` (per preferences) |
-| `experience_author_reject_script` | Author | script_notes | Stores feedback, increments counter | "Author requests script revision" | `awaiting_script_revision` or `failed` |
-| `experience_techeditor_approve` | Tech Editor | (none) | — | "Technical Editor approves" | `awaiting_story_edit` or `complete` |
-| `experience_techeditor_reject` | Tech Editor | tech_edit_report | Stores report, increments counter | "Technical Editor found issues" | `awaiting_tech_fix` or `failed` |
-| `experience_storyeditor_approve` | Story Editor | (none) | — | "Story Editor approves" | `awaiting_tech_edit` or `complete` |
-| `experience_storyeditor_reject` | Story Editor | story_edit_report | Stores report, increments counter | "Story Editor requests changes" | `awaiting_story_fix` or `failed` |
+| `experience_author_submit_outline` | Author | outline, tech_notes, rationale | Stores artifacts, logs rationale | "Author submitted outline" | `awaiting_outline_review` |
+| `experience_scripter_approve_outline` | Scripter | rationale | Logs rationale | "Scripter approves outline" | `awaiting_script` |
+| `experience_scripter_reject_outline` | Scripter | outline_notes, rationale | Stores feedback, increments counter, logs rationale | "Scripter requests outline revision" | `awaiting_outline_revision` or `failed` |
+| `experience_scripter_submit_script` | Scripter | script, rationale | Invokes `IfEngineConnector.build()`, logs rationale | "Compiling script..." then "Script compiled" or "Compilation failed" | `awaiting_author_review` (success) or `awaiting_script_fix` (errors) |
+| `experience_author_approve_script` | Author | rationale | Logs rationale | "Author approves script" | `awaiting_tech_edit` or `awaiting_story_edit` (per preferences) |
+| `experience_author_reject_script` | Author | script_notes, rationale | Stores feedback, increments counter, logs rationale | "Author requests script revision" | `awaiting_script_revision` or `failed` |
+| `experience_techeditor_approve` | Tech Editor | rationale | Logs rationale | "Technical Editor approves" | `awaiting_story_edit` or `complete` |
+| `experience_techeditor_reject` | Tech Editor | tech_edit_report, rationale | Stores report, increments counter, logs rationale | "Technical Editor found issues" | `awaiting_tech_fix` or `failed` |
+| `experience_storyeditor_approve` | Story Editor | rationale | Logs rationale | "Story Editor approves" | `awaiting_tech_edit` or `complete` |
+| `experience_storyeditor_reject` | Story Editor | story_edit_report, rationale | Stores report, increments counter, logs rationale | "Story Editor requests changes" | `awaiting_story_fix` or `failed` |
 
-Note: `@tool` functions return a dict of state field updates. The LangGraph `ToolNode` merges these into the graph state; the `route_after_tool` conditional edge then reads the new `status` to determine the next node.
+### Rationale Logging
+The `current_rationale` and `action_log` state fields (described above) power the Rationale display in the Generate Experience screen. Each `action_log` entry captures the state transition and the agent's reasoning so the player can follow the multi-agent collaboration. The log is session-only and is not persisted to disk.
+
+Note: `@tool` functions return `Command(update={...})` (from `langgraph.types`). This causes LangGraph's `ToolNode` to apply the state changes directly into the graph state; the `route_after_tool` conditional edge then reads the updated `status` to determine the next node. Plain `dict` returns do **not** update graph state — they are serialized only into `ToolMessage.content`.
 
 ## Inputs and artifacts
 The generation is kicked off by a set of inputs, with some steps by some agents producing artifacts consumed by downstream steps/agents. When an agent receives an input in a format specific to ZForge, a description of that input format will be provided as a separate system prompt that indicates it describes that format and includes the specification in the equivalent spec file; e.g. when the Author receives the ZWorld, they also receive a prompt that includes the contents of ZWorld.md and explains that this is a description of the ZWorld format. Any inputs and artifacts whose format is not thus structured, and that don't have a specific structure that is not specific to Z-Forge (e.g. the ink script), are in plain text format as if being exchanged between humans or LLM agents for natural-language communication.

@@ -97,18 +97,21 @@ def make_author_node(llm_connector):
 
 ### ToolNode and Tool Functions
 
+**Important**: Tools must return `Command(update={...})` (from `langgraph.types`), **not** a plain `dict`. LangGraph's `ToolNode` serializes plain dict returns into `ToolMessage.content` as JSON but does **not** merge them into graph state. Only `Command(update={...})` actually updates state, which is required for the conditional router to advance the graph.
+
 ```python
 from langchain_core.tools import tool
+from langgraph.types import Command
 
 @tool
-def submit_outline(outline: str, tech_notes: str) -> dict:
+def submit_outline(outline: str, tech_notes: str, rationale: str) -> Command:
     """Author submits the story outline and tech notes."""
-    return {
+    return Command(update={
         "outline": outline,
         "tech_notes": tech_notes,
         "status": "awaiting_outline_review",
         "status_message": "Author submitted outline",
-    }
+    })
 ```
 
 ### Conditional Edges (Routing)

@@ -15,6 +15,29 @@ Z-Forge is an AI-powered tool for creating and running short Interactive Fiction
 3. **Describe Your Scenario:** Provide a prompt for the kind of story or situation you want.
 4. **Generate & Play:** Z-Forge creates a playable IF experience, which you can play immediately.
 
+## Prerequisites
+
+Z-Forge requires Python 3.11+ and the BeeWare `toga` package for the desktop UI. If the `pip` command is not available on your system, use `python3 -m pip` which is always available when Python is installed.
+
+Install steps (recommended):
+
+```bash
+# Ensure Python 3.11+ is available
+python3 --version
+
+# If pip is missing, bootstrap it and upgrade packaging tools
+python3 -m ensurepip --upgrade
+python3 -m pip install --upgrade pip setuptools wheel
+
+# Install Toga only (fast) or install the project editable (installs all deps)
+# Fast (just Toga):
+python3 -m pip install toga
+# Full editable install (recommended for development):
+python3 -m pip install -e .
+```
+
+If you prefer managing Python versions, consider installing via Homebrew (`brew install python@3.11`), `pyenv`, or the official Python installer from python.org.
+
 ## Framework
 Z-Forge uses [BeeWare](https://beeware.org/) (Toga widget toolkit) for a cross-platform UI (iOS, Android, PC, macOS, Web), Python for all application logic, [LangGraph](https://langchain-ai.github.io/langgraph/) for LLM orchestration, and inkjs (via a Python JS bridge) for compiling and running ink experiences. Project configuration is managed via `pyproject.toml`.
 

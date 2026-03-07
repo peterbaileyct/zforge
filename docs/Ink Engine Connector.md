@@ -4,7 +4,9 @@ Implementation specification for the `InkEngineConnector`, which implements the 
 
 ## Overview
 
-The ink engine connector uses [inkjs](https://github.com/y-lohse/inkjs) (v2.4.0) running inside [py-mini-racer](https://github.com/bpcreech/PyMiniRacer) (Python-embedded V8) to provide both compilation and runtime execution. This approach allows Z-Forge to compile and run ink stories entirely in-process without a separate server or native binaries.
+The ink engine connector uses [inkjs](https://github.com/y-lohse/inkjs) (v2.4.0) running inside [quickjs](https://github.com/PetterS/quickjs) (Python-embedded QuickJS engine) to provide both compilation and runtime execution. This approach allows Z-Forge to compile and run ink stories entirely in-process without a separate server or native binaries.
+
+QuickJS was chosen over V8-based alternatives (e.g. py-mini-racer) because it initialises in ~1ms and evaluates the inkjs runtime in ~35ms, with no platform-specific binary packaging issues.
 
 ## Dependencies
 
@@ -12,7 +14,7 @@ The ink engine connector uses [inkjs](https://github.com/y-lohse/inkjs) (v2.4.0)
 Add to `pyproject.toml`:
 ```toml
 [project.dependencies]
-py-mini-racer = ">=0.12"
+quickjs = ">=1.19"
 ```
 
 ### JavaScript Asset
@@ -36,21 +38,22 @@ src/zforge/services/if_engine/
 
 ```python
 import json
-from py_mini_racer import MiniRacer
-from importlib.resources import files
+import quickjs
+from pathlib import Path
 from zforge.services.if_engine.if_engine_connector import IfEngineConnector, BuildResult, ActionResult
 
 class InkEngineConnector(IfEngineConnector):
     def __init__(self):
-        self._ctx: MiniRacer | None = None
+        self._ctx: quickjs.Context | None = None
 
     async def initialize(self) -> None:
         """Must be called before any other method."""
         if self._ctx is not None:
             return
-        ink_js = files("zforge").joinpath("../../../assets/ink-full.js").read_text()
-        self._ctx = MiniRacer()
-        self._ctx.eval(ink_js)
+        ink_js = (_ASSETS_DIR / "ink-full.js").read_text(encoding="utf-8")
+        ctx = quickjs.Context()
+        ctx.eval(ink_js)
+        self._ctx = ctx
 
     def _ensure_initialized(self) -> None:
         if self._ctx is None:
@@ -83,6 +86,7 @@ ink scripts use a specific syntax for interactive narrative. Key requirements:
 - Choice text in brackets [] is not shown after selection
 - Diverts use -> knot_name or -> knot_name.stitch_name
 - Variables are declared with VAR name = value and modified with ~ name = value
+- CRITICAL: ~ assignments MUST be on their own dedicated line — NEVER on the same line as narrative text or dialogue. WRONG: `"She smiled." ~ courage = true` (the assignment becomes visible text!). RIGHT: put `~ courage = true` on its own separate line before or after the narrative.
 - Use { condition: text } for conditional text
 - Use { variable } to print variable values inline
 - Use <> for glue to join text across lines without whitespace
