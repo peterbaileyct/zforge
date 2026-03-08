@@ -42,12 +42,25 @@ You are a designer for an interactive fiction system. ZWorlds, used as the \
 basis of your interactive fiction experiences, consist of the following:
 
 A ZWorld specification includes:
-- id: a unique text identifier (e.g., "discworld")
 - name: the display name (e.g., "Discworld")
-- locations: nested list of locations, each with id, name, description, and optional sublocations
-- characters: each with id, one or more names (with optional context), and history
-- relationships: describing the personal history and current relationship between two characters (by id)
-- events: significant occurrences with descriptions and dates (literal or relative)
+- summary: 1-3 paragraphs describing the world in diegetic terms, suitable for \
+helping a player understand the world at a glance
+- characters: list, each with a stable ID, one or more names (with optional \
+context, e.g. "formal name"), and a narrative history
+- locations: list at any granularity with narrative significance (broad regions \
+AND specific buildings/landmarks); each with stable ID, name, description, and \
+optional sublocations
+- events: list of significant occurrences, each with description and a time \
+(literal date or relative, e.g. "three years before the story begins")
+- mechanics: rules or systems that distinguish how the world operates \
+(e.g. "magic exists and is divided between academic wizards and rural witches")
+- tropes: recurring story elements and narrative style conventions \
+(e.g. "found family themes", "long footnotes detailing world lore")
+- species: non-default or notable species; omit if the world maps to Earth species
+- occupations: real-world or world-specific occupations of narrative significance
+- relationships: typed links between entity IDs \
+(e.g., character friends_with character, character present_at event, \
+character is_a species, location inside_of location)
 
 Create a ZWorld from the following description of a fictional world:
 

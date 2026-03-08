@@ -68,6 +68,7 @@ Z-Forge uses [BeeWare](https://beeware.org/) (Toga widget toolkit) for a cross-p
 - [User Experience](docs/User%20Experience.md)
 - [LLM Abstraction Layer](docs/LLM%20Abstraction%20Layer.md)
 - [LLM Orchestration](docs/LLM%20Orchestration.md)
+- [Local LLM Execution](docs/Local%20LLM%20Execution.md)
 - [ZWorld Format](docs/ZWorld.md)
 
 ---

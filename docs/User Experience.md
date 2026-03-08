@@ -211,8 +211,49 @@ sequenceDiagram
 - `src/zforge/ui/screens/home_screen.py` — `HomeScreen`
 - `src/zforge/ui/screens/llm_config_screen.py` — `LlmConfigScreen`
 - `src/zforge/ui/screens/create_world_screen.py` — `CreateWorldScreen`
+- `src/zforge/ui/screens/world_details_screen.py` — `WorldDetailsScreen`
 - `src/zforge/ui/screens/preferences_screen.py` — `PreferencesScreen`
 - `src/zforge/ui/screens/generate_experience_screen.py` — `GenerateExperienceScreen`
+
+## World Details Screen
+
+When the user selects a world from the home screen, a **Details** button becomes enabled alongside the existing action buttons. Tapping it navigates to `WorldDetailsScreen`.
+
+### Layout
+- **Title**: the world's title (from KVP), displayed prominently at the top
+- **Summary**: the world's summary text (from KVP), displayed as a scrollable read-only block below the title
+- **Question input**: a single-line text input with placeholder text "Ask a question about this world…" and a **Ask** button to its right
+- **Answer area**: a read-only text area below the question input where the response is displayed
+- **Back button**: returns to the home screen
+
+### Behaviour (current)
+On load, `ZWorldManager.read(slug)` fetches the Z-Bundle's KVP data and populates Title and Summary.
+
+When the user submits a question, the answer area displays `"TODO"`. This is an intentional stub — the question-answering process (Agentic RAG over the Z-Bundle) is not yet implemented.
+
+### Behaviour (future)
+The stub will be replaced by a new Process that uses the full Z-Bundle (vector store + property graph) to answer the user's question via an Agentic RAG operation. The spec for that process will be added when the implementation is ready.
+
+### Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant H as HomeScreen
+    participant WD as WorldDetailsScreen
+    participant WM as ZWorldManager
+
+    U->>H: Select world, tap "Details"
+    H->>WD: Navigate with selected world slug
+    WD->>WM: read(slug)
+    WM-->>WD: KVP data (title, summary)
+    WD-->>U: Display title and summary
+
+    U->>WD: Enter question, tap "Ask"
+    WD-->>U: Display "TODO"
+```
+
+Implements: `src/zforge/ui/screens/world_details_screen.py`
 
 ## Experience Generation UI
 

@@ -17,7 +17,10 @@ Documentation should reference, where appropriate, which code file(s) implement 
 
 Where helpful, documentation should illustrate functions and use cases in which control flow varies significantly via Mermaid flow chart diagrams. Where helpful, documentation should illustrate functions that involve significant communication between the user, AI actors, and/or separate subsystems via Mermaid sequence diagrams. Both flow chart and sequence diagrams may be appropriate for the same functions, and both should be rendered in this case.
 
-Any code changes should be mirrored in changes to/creation of Mermaid ER diagrams in the docs folder.
+Any code changes should be mirrored in changes to/creation of Mermaid ER diagrams in the docs folder. ER diagrams are maintained for **human consumption only** — neither the Silicon Lead nor the outsource team references them when writing or reviewing code. The Silicon Lead updates ER diagrams when making small edits; the outsource team updates ER diagrams as part of their larger implementation work. In neither case are ER diagrams used as an input to implementation decisions.
+
+## Implementation Details
+Precise implementation details — such as specific Python packages, database engines, file paths, or storage formats — must appear in **exactly one place** in the documentation, under an `## Implementation` or `### Implementation` header in the most relevant spec file. All other documentation must refer to the concept abstractly (e.g., "the vector store", "the key-value store", "the Z-Bundle root") and link to the authoritative spec rather than restating the detail. This prevents drift and makes technology changes require edits in only one place.
 
 ## LLM Prompts
 LLM prompts appear in two places and MUST be kept in sync:

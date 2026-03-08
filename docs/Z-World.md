@@ -5,7 +5,9 @@ A Z-Forge World specification is a Z-Bundle used for [RAG](RAG%20and%20GRAG%20Im
 - Title (human-readable, full text, e.g. "Discworld")
 - slug (dash-case, unique among Z-Worlds on the same device, e.g. "lord-of-the-rings")
 - UUID
-- Summary (1-3 paragraphs of plain text describing the world in diagetic terms, used to help unfamiliar users to pick a world for experience generation and to help kick-start experience generation, especially where no prompt is given)
+- Summary (1-3 paragraphs of plain text describing the world in diegetic terms, used to help unfamiliar users to pick a world for experience generation and to help kick-start experience generation, especially where no prompt is given)
+- `embedding_model_name`: basename of the GGUF embedding model file used to encode this bundle (e.g. `"nomic-embed-text-v1.5.Q4_K_M.gguf"`)
+- `embedding_model_size_bytes`: file size in bytes of that GGUF file at encoding time
 
 ## Vector
 Lists of:
