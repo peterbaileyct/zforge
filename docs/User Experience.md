@@ -119,109 +119,23 @@ If no experience is in progress:
  If progress within an experience has been saved, but that experience was not successfully completed before the last time Z-Forge was closed, the user will be asked if they want to continue {name of experience} at application start.
  In addition to their usual places in the main menu, buttons will appear offering the options to "Create World" and, if there is at least one ZWorld available, "Create Experience", and, if there is at least one experience available, "Start Experience" and, if there is at least one saved progress available within an experience, "Resume Experience".
 
+## LLM Configuration
+LLM configuration is a crucial element of the [app config](Application%20Configuration.md). The user is able to specify the provider and model for each LLM node in each [Process](Processes.md). When viewing the LLM configuration screen, the user will see a collabsible display of Processes with their LLM Nodes; for each node, they can select a Provider (from among all available LLM Connectors) and a model (from among the models available for the chosen Connector). If no value, or an invalid value, already exists in the application config for a given node, it will be defaulted to the provider and model listed in the specification for that node of that Process. After the user updates the LLM configuration, the app will check that all required configuration values have been provided for all the selected providers across all nodes; if not, they will be prompted for these configuration values as defined in the LLM Connector Configuraiton section.
+
+## LLM Connector Configuration
+When viewing the LLM Connector configuration screen, the user will see a collabsible display of all available Connectors that have been selected for at least one node, with their required configuration elements, including configured values. The user can update these values. When the user attempts to save the updated values, the connectors will check their validity. If any are not valid, the page will remain open with the problematic connector and, if possible, the specific configuration value(s) identified with an error message and color-coding in red.
+
+Below the API connectors, there will be an additional section for local LLMs. This will display a list of models that have been downloaded, with the option of deleting them. If the user attempts to delete a model, the LLM configuration will be checked to see if it is selected on any nodes. If it is, the node(s) will be reverted to their default. If the default connector on any of these nodes was not in use at the time the page was loaded, it will be added to the page and the user will have to ensure it is configured correctly as described above. To ensure the success of this process, the model file will not actually be deleted until the user saves this page and the LLM connections are successfully validated. The user will also be able to download models as desired from the [model catalogue](Local%20LLM%20Execution.md#model-catalogue).
+
+## Embedding Model Configuration
+On the Embedding Model configuration screen, the user is able to select the preferred embedding model from among those already downloaded. They can also download a new embedding model from the [model catalogue](Local%20LLM%20Execution.md#model-catalogue).
+
 ## Application Start
-### LLM Configuration
-When the user opens the application, Z-Forge checks whether the configured chat and embedding GGUF model files exist on disk. If either is missing, the user is shown the **LLM Configuration screen** before reaching the home screen.
+At application start, the configuration will be checked for completeness and validity. If there is no configuration file, or it has no LLM configuration section, the user will immediately be prompted that no LLM configuration was found, and asked if they want to provide details or accept defaults, with the latter being the default. 
 
-The screen presents:
-- A **model selector** listing the curated chat models from the [model catalogue](Local%20LLM%20Execution.md#model-catalogue), with the smallest model (DeepSeek R1 Distill 1.5B) pre-selected by default
-- A brief description of the selected model (name and approximate size)
-- A **Download** button that initiates download of the selected chat model and the embedding model simultaneously
-- A **progress indicator** (one bar per file) showing bytes received vs. total; file names are shown alongside each bar
-- A status message that updates as downloads complete; once all files are present, Z-Forge automatically proceeds to the home screen
-
-The downloaded files are saved to `models/` in sandboxed storage (see [File Storage](File%20Storage.md)) and their paths are written to `ZForgeConfig`. No credentials or API keys are required. The screen is also accessible from the main menu to switch to a different model.
-
-### Player Preferences
-Player preferences, if not already specified, default to 5/10 complexity and 5/10 plot-to-character-development ratio. TODO: In a future version of Z-Forge, the user will be prompted with a series of Ultima-like questions to gauge their preferences.
-
-## Back-End and Front-End Elements
-### ZForgeConfig
-A single `ZForgeConfig` is either loaded from insecure storage at application start or created with defaults if unavailable. This includes player preferences as defined in the [spec file](Data%20and%20File%20Specifications.md), paths to chat and embedding GGUF model files (under `models/`), and model context/GPU settings. On Mac and PC it also includes the path to the user's ZWorld and ink experience storage folders, both of which default to `~/zforge/`. On mobile these are stored in application data; on web, TODO.
-
-`ZForgeConfig` is persisted as a JSON file in the user's config directory, accessed via the Python [`platformdirs`](https://pypi.org/project/platformdirs/) library (e.g., `user_config_dir("zforge")`).
-
-> **No secrets stored.** Z-Forge uses only local models and requires no API keys or credentials. `ZForgeSecureConfig` and `keyring` are no longer used.
-
-### ZWorldManager
-A singleton ZWorldManager object handles CRUD operations on ZWorlds. Create can be invoked with an optional flag (default false) to suppress an event that is normally used to prompt the user to create an experience in the new ZWorld. ZWorld are written in JSON format to the user's ZWorld storage, which is local application storage on mobile or a configured folder on Mac or PC. (On web, TODO.)
-
-### ExperienceManager
-A singleton ExperienceManager object handles CRUD operations on experiences. Create can be invoked with an optional flag (default false) to suppress an event that is normally used to begin playing the experience.
-
-#### Experience Storage
-Experiences are organized by the ZWorld they were generated from:
-- **Storage location**: `{experienceFolderPath}/{zworld.id}/` on Mac/PC; application storage on mobile
-- **File naming**: `{experience-name}.{engine-extension}`, e.g., `bank-heist.ink.json`
-- **File extension**: Determined by the IF engine (see [IF Engine Abstraction Layer](IF%20Engine%20Abstraction%20Layer.md)); identifies which engine can play the experience
-- **Saved progress**: Stored alongside experiences as `{experience-name}.save`
-
-Experiences are enumerated by reading the contents of world subfolders. Given the expected small number of experiences (hundreds at most for personal use), no database or index is maintained.
-
-## Application Startup Flow
-
-```mermaid
-flowchart TD
-    A[App Launch] --> B[Load ZForgeConfig\nfrom platformdirs JSON file]
-    B --> C{Chat + embedding\nmodel files present?}
-    C -- No --> D[Show LlmConfigScreen\nModel picker + Download]
-    D --> E{Downloads\ncomplete?}
-    E -- No --> D
-    E -- Yes --> F[Write model paths\nto ZForgeConfig]
-    F --> G[Show HomeScreen]
-    C -- Yes --> G
-    G --> H{Worlds exist?}
-    H -- No --> I[Show Create World button only]
-    H -- Yes --> J[Show world list\n+ all available buttons]
-```
-
-## World Creation Sequence
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant H as HomeScreen
-    participant C as CreateWorldScreen
-    participant G as LangGraph (world_creation_graph)
-    participant LLM as LLM (LangChain model)
-    participant WM as ZWorldManager
-
-    U->>H: Tap "Create World"
-    H->>C: Navigate to CreateWorldScreen
-    U->>C: Enter description / load file
-    U->>C: Tap "Create World"
-    C->>G: astream(initial_state)
-    loop Validate (up to 5x)
-        G->>LLM: validate_input tool call
-        LLM-->>G: valid=true/false
-    end
-    alt Valid
-        G->>LLM: create_zworld tool call
-        LLM-->>G: ZWorld args
-        G->>WM: create(ZWorld)
-        WM-->>G: saved
-        G-->>C: status=complete
-        C-->>H: navigate back + show confirmation
-        H-->>U: World list updated
-    else Invalid
-        G-->>C: status=failed, failure_reason
-        C-->>U: Show error message
-    end
-```
-
-## Implementation Files
-- `src/zforge/__main__.py` — entry point
-- `src/zforge/app.py` — `ZForgeApp` (Toga `App` subclass)
-- `src/zforge/app_state.py` — `AppState`
-- `src/zforge/ui/screens/home_screen.py` — `HomeScreen`
-- `src/zforge/ui/screens/llm_config_screen.py` — `LlmConfigScreen`
-- `src/zforge/ui/screens/create_world_screen.py` — `CreateWorldScreen`
-- `src/zforge/ui/screens/world_details_screen.py` — `WorldDetailsScreen`
-- `src/zforge/ui/screens/preferences_screen.py` — `PreferencesScreen`
-- `src/zforge/ui/screens/generate_experience_screen.py` — `GenerateExperienceScreen`
+If the user declines to open the LLM configuration, the app will go on to validate the LLM connector configuration as described in the LLM Connector Configuration section. If it is invalid, the user will be shown the LLM Connector configuration, as described above. There is one exception: If any connectors are used but their configuration values are simply absent, no attempt will be made to validate the configuration with the provider, and the user will see a more neutral message indicating that the configuration needs to be specified and not that it is invalid.
 
 ## World Details Screen
-
 When the user selects a world from the home screen, a **Details** button becomes enabled alongside the existing action buttons. Tapping it navigates to `WorldDetailsScreen`.
 
 ### Layout
@@ -240,7 +154,6 @@ When the user submits a question, the answer area displays `"TODO"`. This is an 
 The stub will be replaced by a new Process that uses the full Z-Bundle (vector store + property graph) to answer the user's question via an Agentic RAG operation. The spec for that process will be added when the implementation is ready.
 
 ### Sequence Diagram
-
 ```mermaid
 sequenceDiagram
     participant U as User
@@ -256,62 +169,4 @@ sequenceDiagram
 
     U->>WD: Enter question, tap "Ask"
     WD-->>U: Display "TODO"
-```
-
-Implements: `src/zforge/ui/screens/world_details_screen.py`
-
-## Experience Generation UI
-
-### Flow
-1. User selects a ZWorld from the home screen and taps "Generate Experience"
-2. User is presented with `GenerateExperienceScreen`, which shows:
-   - The selected world's name
-   - An optional text input for a player prompt (specific experience request)
-   - A "Generate" button
-3. Upon tapping "Generate", the `experience_generation_graph` LangGraph run begins
-4. During generation, progress is displayed (see below)
-5. On success, the user is prompted to play the new experience
-6. On failure, the `failure_reason` is displayed (e.g., "Failed to generate a compileable script after five tries. Giving up.")
-
-### Progress Display
-During generation, the UI displays the `status_message` field streamed from the running LangGraph graph (e.g., "Author submitted outline", "Scripter approves outline", "Compiling script...").
-
-On failure, the `failure_reason` is displayed instead.
-
-**TODO**: Visual flowchart showing process steps with color-coded status (requires Peanut Gallery workflow model).
-
-**TODO**: Allow user cancellation of in-progress generation.
-
-### Experience Generation Sequence
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant H as HomeScreen
-    participant GE as GenerateExperienceScreen
-    participant G as LangGraph (experience_generation_graph)
-    participant LLM as LLM Connector
-    participant EM as ExperienceManager
-
-    U->>H: Select ZWorld, tap "Generate Experience"
-    H->>GE: Navigate with selected ZWorld
-    U->>GE: Optionally enter prompt
-    U->>GE: Tap "Generate"
-    GE->>G: astream(initial_state)
-    
-    loop Generation Process
-        G-->>GE: status_message update (via astream chunk)
-        GE-->>U: Display progress
-        G->>LLM: Agent node calls (Author, Scripter, Editors)
-        LLM-->>G: Tool calls update graph state
-    end
-    
-    alt Success
-        G-->>GE: status=complete, compiled_output
-        GE->>EM: save(experience)
-        GE-->>U: "Experience created! Play now?"
-    else Failure
-        G-->>GE: status=failed, failure_reason
-        GE-->>U: Display error message
-    end
 ```

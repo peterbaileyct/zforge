@@ -169,4 +169,24 @@ flowchart TD
 ```
 
 ## Implementation
-The Editor and Designer use the configured local LLM (see [Local LLM Execution](Local%20LLM%20Execution.md)). Chunking parameters and context size defaults are defined in [graph_utils.py](../src/zforge/graphs/graph_utils.py) and [zforge_config.py](../src/zforge/models/zforge_config.py) respectively. The default context window is 8 192 tokens.
+The Editor and Designer use the configured LLM provider (see [LLM Abstraction Layer](LLM%20Abstraction%20Layer.md)), which defaults to the remote gpt-5 nano model; local connectors from [Local LLM Execution](Local%20LLM%20Execution.md) are available as an explicit override. Chunking parameters and context size defaults are defined in [graph_utils.py](../src/zforge/graphs/graph_utils.py) and [zforge_config.py](../src/zforge/models/zforge_config.py) respectively. The default context window is 8 192 tokens.
+
+### Process slug and node mapping
+- `world_generation`: slug used for the Process definition and to look up LLM configuration values for this workflow.
+- `editor` and `designer`: node slugs that match the node names in [world_creation_graph.py](../src/zforge/graphs/world_creation_graph.py) and are surfaced by the LLM configuration UI so each node can point to a different connector/model pair when desired.
+- Both nodes default to the same provider/model pair that delivers the remote gpt-5 nano model (the provider name is the same string presented by the selected connector, while the model string is “gpt-5 nano”).
+
+### Runtime configuration
+- `ZForgeConfig` exposes an `llm_nodes` mapping (persisted via `ConfigService` in `zforge_config.json`; see [Application Configuration](Application%20Configuration.md) for storage details). The structure is:
+  ```json
+  {
+    "llm_nodes": {
+      "world_generation": {
+        "editor": {"provider": "<connector_name>", "model": "gpt-5 nano"},
+        "designer": {"provider": "<connector_name>", "model": "gpt-5 nano"}
+      }
+    }
+  }
+  ```
+- `<connector_name>` must match the `LlmConnector` name exposed through the LLM configuration screen, and the model string must match the connector’s available models. Defaults are populated with the provider that supplies remote gpt-5 nano for both nodes, but the user can override either node without affecting the other.
+- `build_create_world_graph()` resolves the connector assigned to each node via this map and passes the resulting `LlmConnector` into `_make_editor_node()` and `_make_designer_node()`. This keeps the rest of the graph agnostic to per-node selection while still enforcing the node slug names defined above.

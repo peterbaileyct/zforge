@@ -1,10 +1,10 @@
 # Local LLM Execution
 
-Z-Forge runs **all LLM inference on-device** using local GGUF models. There is no cloud LLM path — no OpenAI, Anthropic, or other hosted provider is used or supported. Local execution covers both **chat inference** (graph agent nodes) and **embedding generation** (Z-Bundle encoding).
+Z-Forge supports running GGUF-based inference locally as an optional offline path alongside the remote connectors described in [LLM Abstraction Layer](LLM%20Abstraction%20Layer.md). The world generation process defaults to the remote gpt-5 nano model, but local connectors remain available when the user explicitly selects an on-device model (for offline, privacy-sensitive, or low-latency scenarios). This document describes those local connectors and their role in chat inference and embedding generation.
 
 ## Use Cases
 
-- **Chat inference**: The sole LLM inference path for all LangGraph agent nodes. `LlamaCppConnector` is the only supported `LlmConnector` implementation.
+- **Chat inference**: `LlamaCppConnector` can run LangGraph agent nodes whenever the configuration selects an on-device provider; remote connectors described in [LLM Abstraction Layer](LLM%20Abstraction%20Layer.md) are also available when connectivity and policy permit.
 - **Embedding generation**: Converting entity text chunks to vector embeddings during Z-Bundle encoding (required by [World Generation](World%20Generation.md) and any future process that encodes a Z-Bundle).
 
 ## Connector Abstraction
