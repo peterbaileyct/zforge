@@ -62,6 +62,12 @@ class CreateWorldState(TypedDict):
     # State
     input_valid: bool | None
 
+    # Chunking — input is pre-split by the chunker node; partial extractions
+    # accumulate across chunks and are merged in the finalizer node.
+    input_chunks: list[str]
+    current_chunk_index: Annotated[int, operator.add]
+    partial_zworlds: Annotated[list, operator.add]
+
     # Counters
     validation_iterations: Annotated[int, operator.add]
 

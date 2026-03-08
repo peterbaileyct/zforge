@@ -46,7 +46,12 @@ class ConfigService:
     def _apply_defaults(config: ZForgeConfig) -> None:
         """Fill in default paths if not set (desktop only)."""
         home = Path.home()
-        if not config.zworld_folder:
-            config.zworld_folder = str(home / "zforge" / "worlds")
+        if not config.bundles_root:
+            config.bundles_root = str(home / "zforge" / "bundles")
         if not config.experience_folder:
             config.experience_folder = str(home / "zforge" / "experiences")
+        # Guard against stale on-disk configs with the original 512-token default.
+        # 512 tokens is insufficient for any useful LLM interaction.
+        _MIN_CONTEXT_SIZE = 4096
+        if config.chat_context_size < _MIN_CONTEXT_SIZE:
+            config.chat_context_size = 8192

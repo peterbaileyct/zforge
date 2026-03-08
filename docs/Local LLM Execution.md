@@ -1,10 +1,10 @@
 # Local LLM Execution
 
-Z-Forge supports local (on-device) LLM execution for both **chat inference** and **embedding generation**. Local chat is used as an alternative to cloud LLM providers for graph agent nodes. Local embedding is used during Z-Bundle encoding and is always local — there is no cloud embedding path.
+Z-Forge runs **all LLM inference on-device** using local GGUF models. There is no cloud LLM path — no OpenAI, Anthropic, or other hosted provider is used or supported. Local execution covers both **chat inference** (graph agent nodes) and **embedding generation** (Z-Bundle encoding).
 
 ## Use Cases
 
-- **Chat inference**: Drop-in alternative to cloud providers (e.g., OpenAI) for any LangGraph agent node. Selected via config in the same way as any other `LlmConnector`.
+- **Chat inference**: The sole LLM inference path for all LangGraph agent nodes. `LlamaCppConnector` is the only supported `LlmConnector` implementation.
 - **Embedding generation**: Converting entity text chunks to vector embeddings during Z-Bundle encoding (required by [World Generation](World%20Generation.md) and any future process that encodes a Z-Bundle).
 
 ## Connector Abstraction
@@ -14,7 +14,7 @@ Z-Forge supports local (on-device) LLM execution for both **chat inference** and
 `LlmConnector` is an abstract connector for chat inference. It defines:
 
 - A display name for the connector
-- A list of required configuration keys (e.g., API key for cloud providers; empty for local)
+- A list of required configuration keys (empty for local GGUF connectors — no credentials needed)
 - A validation method that returns true if the connector is fully configured and usable
 - A method that returns a LangChain `BaseChatModel` ready for use in a graph agent node
 
@@ -31,24 +31,43 @@ Z-Forge supports local (on-device) LLM execution for both **chat inference** and
 
 The `EmbeddingConnector` is injected wherever Z-Bundle encoding occurs, keeping graph and encoding code independent of the backend.
 
+## Model Catalogue
+
+Z-Forge ships with a curated catalogue of supported GGUF models. Each entry records a display name, Hugging Face repo, filename, approximate download size, and role (chat or embedding).
+
+| Role | Display Name | HF Repo | Filename | Size |
+|---|---|---|---|---|
+| Chat | DeepSeek R1 Distill 1.5B (default) | `bartowski/DeepSeek-R1-Distill-Qwen-1.5B-GGUF` | `DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf` | ~1 GB |
+| Chat | DeepSeek R1 Distill 7B | `bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF` | `DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf` | ~4.4 GB |
+| Embedding | Nomic Embed Text 1.5 | `nomic-ai/nomic-embed-text-v1.5-GGUF` | `nomic-embed-text-v1.5.Q4_K_M.gguf` | ~90 MB |
+
+The 1.5B chat model is the default selection. The embedding model has no alternative; it is always downloaded automatically alongside whichever chat model is chosen.
+
+Hugging Face CDN download URLs follow the form:
+```
+https://huggingface.co/{owner}/{repo}/resolve/main/{filename}
+```
+
 ## Model Configuration
 
 Each model (chat and embedding) is configured separately. The configuration specifies:
 
-- **Model file path** — path to the GGUF file, relative to platform-specific sandboxed storage (see [File Storage](File%20Storage.md))
+- **Model file path** — relative path within sandboxed storage (see [File Storage](File%20Storage.md)); always under `models/`
 - **Context window size** — number of tokens
 - **GPU layer offload count** — number of transformer layers to offload to GPU/Metal (0 = CPU only)
 
-Default values for context size and GPU offload are defined in config; the user may override them.
+Default values for context size and GPU offload are defined in config; the user may override them via the LLM configuration screen.
+
+## Model Acquisition
+
+Z-Forge downloads models on first run via the LLM Configuration screen (see [User Experience](User%20Experience.md)). The user selects from the model catalogue; Z-Forge downloads the chosen chat model and the embedding model from Hugging Face and saves both to `models/` in sandboxed storage. No manual file placement is required.
 
 ## Model Availability
 
 On startup (and before any operation requiring a local model), Z-Forge checks that the configured GGUF file exists at the specified path. If it does not:
 
-- For **chat**: The local connector is treated as unconfigured, the same as a cloud connector with a missing API key. The UI surfaces a configuration prompt.
-- For **embedding**: World Generation (and any other Z-Bundle encoding process) cannot proceed. The UI surfaces an error with guidance to configure a model path.
-
-Z-Forge does not download models. The user is responsible for obtaining GGUF files and placing them at the configured path.
+- For **chat**: The UI shows the LLM Configuration screen (model picker + download).
+- For **embedding**: World Generation (and any other Z-Bundle encoding process) cannot proceed. The UI surfaces an error directing the user to the LLM Configuration screen.
 
 ## Wiring
 
@@ -59,14 +78,14 @@ Z-Forge does not download models. The user is responsible for obtaining GGUF fil
 ```python
 embedding_connector = LlamaCppEmbeddingConnector()
 # ...configure from config/secure config...
-zworld_manager = ZWorldManager(config.zworld_folder, embedding_connector)
+zworld_manager = ZWorldManager(config.bundles_root, embedding_connector)
 ```
 
 `ZWorldManager.create()` is then responsible for the full Z-Bundle encoding pipeline — embedding each chunk and writing all three stores (KVP, vector, property graph). The graph and tool layer hand structured data to the tool; the tool calls the manager; the manager handles encoding. No embedding-related arguments are added to the graph or tool signatures.
 
 ### Availability check
 
-`app.py` calls `embedding_connector.validate()` at startup alongside `llm_connector.validate()`. If the embedding connector is not valid (GGUF file missing or unconfigured), the world creation entry point in the UI is disabled with a message directing the user to configure an embedding model path. This mirrors the way a missing LLM API key disables generation features.
+`app.py` calls `embedding_connector.validate()` at startup alongside `llm_connector.validate()`. If either connector is not valid (GGUF file missing or unconfigured), the UI shows the LLM Configuration screen before the home screen is displayed.
 
 `AppState` holds a reference to the `EmbeddingConnector` so that screens can check its validity when deciding whether to enable world creation controls.
 
@@ -84,4 +103,6 @@ Re-encoding (running world generation again on the same input to rebuild the Z-B
 - Embedding backend: `llama-cpp-python` via LangChain's `LlamaCppEmbeddings` class
 - Both require the `llama-cpp-python` package; a single installation covers both use cases
 - `LlamaCppConnector` lives in `src/zforge/services/llm/`
-- `EmbeddingConnector` (ABC) and `LlamaCppEmbeddingConnector` live in a new `src/zforge/services/embedding/` module
+- `EmbeddingConnector` (ABC) and `LlamaCppEmbeddingConnector` live in `src/zforge/services/embedding/`
+- Model catalogue is a static data structure in `src/zforge/models/model_catalogue.py` — a list of `ModelCatalogueEntry` dataclasses with fields: `role` (chat/embedding), `display_name`, `hf_repo`, `filename`, `size_bytes_approx`, `is_default`
+- Download logic lives in `src/zforge/services/model_download_service.py`. It streams the HF CDN URL with `httpx` (async) and writes to `{user_data_dir}/models/{filename}`, reporting byte progress via a callback so the UI can update a progress bar. No auth token is required for these public models.

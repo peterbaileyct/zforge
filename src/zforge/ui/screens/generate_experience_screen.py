@@ -51,7 +51,7 @@ class GenerateExperienceScreen:
         self._box.add(title)
 
         world_label = toga.Label(
-            f"World: {self._zworld.name}",
+            f"World: {self._zworld.title}",
             style=Pack(padding_bottom=10),
         )
         self._box.add(world_label)
@@ -126,7 +126,7 @@ class GenerateExperienceScreen:
                 name = player_prompt[:30].replace(" ", "-") if player_prompt else "experience"
                 name = "".join(c for c in name if c.isalnum() or c == "-")
                 self._last_experience = self._state.zforge_manager.experience_manager.create(
-                    zworld_id=self._zworld.id,
+                    zworld_id=self._zworld.slug,
                     name=name,
                     compiled_data=compiled,
                 )

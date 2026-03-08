@@ -42,6 +42,7 @@ class ZForgeManager:
         self.experience_manager = experience_manager
         self._llm_connector = llm_connector
         self._if_engine_connector = if_engine_connector
+        self._world_creation_graph = None
 
         # Inject dependencies for tool functions
         set_zworld_manager(zworld_manager)
@@ -58,17 +59,42 @@ class ZForgeManager:
         log.info("run_process: starting — initial status=%r", initial_state.get("status"))
         final_state = initial_state
         try:
-            async for chunk in graph.astream(initial_state):
-                for node_name, node_output in chunk.items():
+            async for mode, data in graph.astream(initial_state, stream_mode=["updates", "debug"]):
+                if mode == "debug":
+                    log.debug(
+                        "run_process: [graph:debug] type=%r step=%r payload=%r",
+                        data.get("type"),
+                        data.get("step"),
+                        data.get("payload"),
+                    )
+                    continue
+                # mode == "updates": data is {node_name: node_output}
+                for node_name, node_output in data.items():
                     log.debug("run_process: chunk from node=%r output=%r", node_name, node_output)
                     if isinstance(node_output, dict):
+                        prev_status = final_state.get("status")
                         final_state = {**final_state, **node_output}
-                        status = node_output.get("status") or final_state.get("status")
+                        new_status = final_state.get("status")
+                        status_changed = new_status != prev_status
                         msg = node_output.get("status_message")
                         log.info(
-                            "run_process: node=%r status=%r message=%r",
-                            node_name, status, msg,
+                            "run_process: node=%r  status=%r%s  message=%r",
+                            node_name,
+                            new_status,
+                            f"  (was {prev_status!r})" if status_changed else "",
+                            msg,
                         )
+                        # Surface interesting state shape so failures are diagnosable
+                        if any(k in node_output for k in ("status", "validation_iterations", "partial_zworlds", "current_chunk_index")):
+                            partial_count = len(final_state.get("partial_zworlds") or [])
+                            chunk_idx = final_state.get("current_chunk_index", 0)
+                            chunks_total = len(final_state.get("input_chunks") or [])
+                            val_iters = final_state.get("validation_iterations", 0)
+                            log.info(
+                                "run_process: [%s] validation_iterations=%d  "
+                                "chunk=%d/%d  partial_zworlds=%d",
+                                node_name, val_iters, chunk_idx, chunks_total, partial_count,
+                            )
                         if on_status_update and msg:
                             on_status_update(msg)
                         if on_rationale_update and "action_log" in node_output:
@@ -92,10 +118,16 @@ class ZForgeManager:
         on_status_update: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         """Run the world creation process."""
-        graph = build_create_world_graph(self._llm_connector)
+        if self._world_creation_graph is None:
+            log.info("start_world_creation: building graph (first call)")
+            self._world_creation_graph = build_create_world_graph(self._llm_connector)
+        graph = self._world_creation_graph
         initial_state = {
             "input_text": input_text,
             "input_valid": None,
+            "input_chunks": [],
+            "current_chunk_index": 0,
+            "partial_zworlds": [],
             "validation_iterations": 0,
             "status": "awaiting_validation",
             "status_message": "Starting world creation...",
@@ -112,36 +144,12 @@ class ZForgeManager:
         on_status_update: Callable[[str], None] | None = None,
         on_rationale_update: Callable[[str, dict], None] | None = None,
     ) -> dict[str, Any]:
-        """Run the experience generation process."""
-        if on_status_update:
-            on_status_update("Initializing IF engine...")
-        await self._if_engine_connector.initialize()
-        graph = build_experience_generation_graph(
-            self._llm_connector, self._if_engine_connector, on_status_update
+        """Run the experience generation process.
+
+        TODO: Experience generation must be reworked to consume the new
+        Z-Bundle world format.  For now this raises NotImplementedError.
+        """
+        raise NotImplementedError(
+            "Experience generation has not yet been updated for the new "
+            "Z-Bundle world format. This will be implemented in a future update."
         )
-        initial_state = {
-            "z_world": z_world.to_dict(),
-            "preferences": preferences.to_dict(),
-            "player_prompt": player_prompt,
-            "outline": None,
-            "tech_notes": None,
-            "outline_notes": None,
-            "script": None,
-            "script_notes": None,
-            "tech_edit_report": None,
-            "story_edit_report": None,
-            "compiled_output": None,
-            "compiler_errors": [],
-            "outline_iterations": 0,
-            "script_compile_iterations": 0,
-            "author_review_iterations": 0,
-            "tech_edit_iterations": 0,
-            "story_edit_iterations": 0,
-            "status": "awaiting_outline",
-            "status_message": "Starting experience generation...",
-            "failure_reason": None,
-            "current_rationale": None,
-            "action_log": [],
-            "messages": [],
-        }
-        return await self.run_process(graph, initial_state, on_status_update, on_rationale_update)

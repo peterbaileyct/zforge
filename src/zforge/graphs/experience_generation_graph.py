@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 log = logging.getLogger(__name__)
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from zforge.graphs.graph_utils import log_node
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
@@ -499,8 +500,8 @@ def _get_action_prompt(status: str) -> str:
 def _make_author_node(llm_connector: LlmConnector, on_status_update=None):
     model = llm_connector.get_model()
 
+    @log_node("author")
     def author_node(state: ExperienceGenerationState) -> dict:
-        log.info("author_node: entered — status=%r", state.get("status"))
         set_current_status(state["status"])
         pre_msg = {
             "awaiting_outline": "Author is drafting outline...",
@@ -543,8 +544,8 @@ def _make_scripter_node(
 ):
     model = llm_connector.get_model()
 
+    @log_node("scripter")
     def scripter_node(state: ExperienceGenerationState) -> dict:
-        log.info("scripter_node: entered — status=%r", state.get("status"))
         set_current_status(state["status"])
         pre_msg = {
             "awaiting_outline_review": "Scripter is evaluating outline...",
@@ -592,8 +593,8 @@ def _make_scripter_node(
 def _make_tech_editor_node(llm_connector: LlmConnector, on_status_update=None):
     model = llm_connector.get_model()
 
+    @log_node("tech_editor")
     def tech_editor_node(state: ExperienceGenerationState) -> dict:
-        log.info("tech_editor_node: entered — status=%r", state.get("status"))
         set_current_status(state["status"])
         if on_status_update:
             on_status_update("Technical Editor is reviewing script...")
@@ -617,8 +618,8 @@ def _make_tech_editor_node(llm_connector: LlmConnector, on_status_update=None):
 def _make_story_editor_node(llm_connector: LlmConnector, on_status_update=None):
     model = llm_connector.get_model()
 
+    @log_node("story_editor")
     def story_editor_node(state: ExperienceGenerationState) -> dict:
-        log.info("story_editor_node: entered — status=%r", state.get("status"))
         set_current_status(state["status"])
         if on_status_update:
             on_status_update("Story Editor is reviewing script...")

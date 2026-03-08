@@ -14,7 +14,7 @@ def _configure_logging() -> None:
     # Reduce chatter from third-party libraries
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("openai").setLevel(logging.WARNING)
+    logging.getLogger("llama_cpp").setLevel(logging.WARNING)
     logging.getLogger("langgraph").setLevel(logging.INFO)
     logging.getLogger("langchain").setLevel(logging.INFO)
 

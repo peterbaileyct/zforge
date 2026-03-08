@@ -47,16 +47,28 @@ class PlayerPreferences:
 class ZForgeConfig:
     """Application configuration persisted as JSON via platformdirs."""
 
-    zworld_folder: str = ""
+    bundles_root: str = ""
     experience_folder: str = ""
     default_if_engine: str = "ink"
+    chat_model_path: str = ""
+    chat_context_size: int = 8192
+    chat_gpu_layers: int = 0
+    embedding_model_path: str = ""
+    embedding_context_size: int = 512
+    embedding_gpu_layers: int = 0
     preferences: PlayerPreferences = field(default_factory=PlayerPreferences)
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "zworld_folder": self.zworld_folder,
+            "bundles_root": self.bundles_root,
             "experience_folder": self.experience_folder,
             "default_if_engine": self.default_if_engine,
+            "chat_model_path": self.chat_model_path,
+            "chat_context_size": self.chat_context_size,
+            "chat_gpu_layers": self.chat_gpu_layers,
+            "embedding_model_path": self.embedding_model_path,
+            "embedding_context_size": self.embedding_context_size,
+            "embedding_gpu_layers": self.embedding_gpu_layers,
             "preferences": self.preferences.to_dict(),
         }
 
@@ -64,8 +76,14 @@ class ZForgeConfig:
     def from_dict(cls, data: dict[str, Any]) -> ZForgeConfig:
         prefs_data = data.get("preferences", {})
         return cls(
-            zworld_folder=data.get("zworld_folder", ""),
+            bundles_root=data.get("bundles_root", ""),
             experience_folder=data.get("experience_folder", ""),
             default_if_engine=data.get("default_if_engine", "ink"),
+            chat_model_path=data.get("chat_model_path", ""),
+            chat_context_size=data.get("chat_context_size", 8192),
+            chat_gpu_layers=data.get("chat_gpu_layers", 0),
+            embedding_model_path=data.get("embedding_model_path", ""),
+            embedding_context_size=data.get("embedding_context_size", 512),
+            embedding_gpu_layers=data.get("embedding_gpu_layers", 0),
             preferences=PlayerPreferences.from_dict(prefs_data),
         )

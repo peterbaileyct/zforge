@@ -1,17 +1,14 @@
 # Z-Forge Data Model ER Diagram
 
-All persistent data models used by Z-Forge. Implemented across `lib/models/`.
+All persistent data models used by Z-Forge. Implemented across `src/zforge/models/`.
 
 ```mermaid
 erDiagram
     ZWorld {
-        string id
-        string name
-    }
-    Location {
-        string id
-        string name
-        string description
+        string title
+        string slug
+        string uuid
+        string summary
     }
     Character {
         string id
@@ -21,18 +18,49 @@ erDiagram
         string name
         string context "optional"
     }
-    Relationship {
-        string character_a_id
-        string character_b_id
+    Location {
+        string id
+        string name
         string description
     }
-    WorldEvent {
+    Event {
         string description
-        string date
+        string time
+    }
+    Mechanic {
+        string text
+    }
+    Trope {
+        string text
+    }
+    Species {
+        string text
+    }
+    Occupation {
+        string text
+    }
+    Relationship {
+        string from_id
+        string to_id
+        string type
+    }
+    ZBundleKVP {
+        string title
+        string slug
+        string uuid
+        string summary
+        string embedding_model_name
+        int embedding_model_size_bytes
     }
     ZForgeConfig {
-        string zWorldFolderPath "optional; desktop only"
+        string bundlesRoot "optional; desktop only"
         string experienceFolderPath "optional; desktop only"
+        string chatModelPath "relative to sandboxed storage"
+        int chatContextSize "default 512"
+        int chatGpuLayers "default 0"
+        string embeddingModelPath "relative to sandboxed storage"
+        int embeddingContextSize "default 512"
+        int embeddingGpuLayers "default 0"
     }
     PlayerPreferences {
         int    characterToPlot      "1-10; 1=character, 10=plot; default 5"
@@ -42,21 +70,75 @@ erDiagram
         string generalPreferences   "optional free text"
         int    logicalVsMood        "1-10; 1=mood priority, 10=logic priority; default 5"
     }
-    ZForgeSecureConfig {
-    }
-    LlmConnectorConfiguration {
-        string connectorName
-        map    values         "key/value credential pairs"
+    ModelCatalogueEntry {
+        string role "chat or embedding"
+        string displayName
+        string hfRepo "Hugging Face repo"
+        string filename "GGUF filename"
+        int sizeBytesApprox
+        bool isDefault
     }
 
-    ZWorld       ||--o{ Location                : "has"
+    ZForgeConfig ||--|| PlayerPreferences       : "contains"
     ZWorld       ||--o{ Character               : "has"
+    ZWorld       ||--o{ Location                : "has"
+    ZWorld       ||--o{ Event                   : "has"
+    ZWorld       ||--o{ Mechanic                : "has"
+    ZWorld       ||--o{ Trope                   : "has"
+    ZWorld       ||--o{ Species                 : "has"
+    ZWorld       ||--o{ Occupation              : "has"
     ZWorld       ||--o{ Relationship            : "has"
-    ZWorld       ||--o{ WorldEvent              : "has"
     Location     ||--o{ Location                : "sublocations"
     Character    ||--o{ CharacterName           : "has"
-    ZForgeConfig ||--|| PlayerPreferences       : "contains"
-    ZForgeSecureConfig ||--o{ LlmConnectorConfiguration : "keyed by connectorName"
+    ZWorld       ||--|| ZBundleKVP              : "persisted as"
+```
+
+## Z-Bundle Storage
+
+Z-Worlds are persisted as Z-Bundles at `bundles/world/{slug}/`:
+- `kvp.json` — key-value metadata (title, slug, UUID, summary, embedding model identity)
+- `vector/` — LanceDB vector store (entity embeddings with entity_id, entity_type, text columns)
+- `propertygraph/` — KùzuDB property graph (Entity nodes + Relationship edges)
+
+```mermaid
+erDiagram
+    ZBundle {
+        string type_slug "e.g. world"
+        string slug "e.g. discworld"
+    }
+    KVPStore {
+        string path "kvp.json"
+    }
+    VectorStore {
+        string path "vector/"
+        string backend "LanceDB"
+    }
+    PropertyGraph {
+        string path "propertygraph/"
+        string backend "KuzuDB"
+    }
+    VectorRow {
+        floatArray vector
+        string entity_id
+        string entity_type
+        string text
+    }
+    GraphEntity {
+        string entity_id
+        string entity_type
+    }
+    GraphRelationship {
+        string type
+    }
+
+    ZBundle      ||--|| KVPStore         : "contains"
+    ZBundle      ||--|| VectorStore      : "contains"
+    ZBundle      ||--|| PropertyGraph    : "contains"
+    VectorStore  ||--o{ VectorRow        : "rows"
+    PropertyGraph ||--o{ GraphEntity     : "nodes"
+    PropertyGraph ||--o{ GraphRelationship : "edges"
+    GraphRelationship }o--|| GraphEntity : "from"
+    GraphRelationship }o--|| GraphEntity : "to"
 ```
 
 ## Runtime / Service Models
@@ -66,7 +148,7 @@ These models are created and managed by services at runtime. See the correspondi
 ```mermaid
 erDiagram
     Experience {
-        string zworldId
+        string zworldSlug
         string name
         string engineExtension
         string filePath
@@ -114,10 +196,13 @@ erDiagram
 ```
 
 ## Notes
-- `.zworld` files are JSON representations of `ZWorld`, stored locally by `ZWorldManager` (`src/zforge/managers/zworld_manager.py`).
+- Z-Worlds are stored as Z-Bundles under `bundles/world/{slug}/` by `ZWorldManager` (`src/zforge/managers/zworld_manager.py`).
 - `Experience` objects are managed by `ExperienceManager` (`src/zforge/managers/experience_manager.py`), stored as compiled `.ink.json` files under the experience folder.
 - `ZForgeConfig` is persisted via `ConfigService` (`src/zforge/services/config_service.py`) using `platformdirs` JSON file storage.
-- `ZForgeSecureConfig` is persisted via `SecureConfigService` (`src/zforge/services/secure_config_service.py`) using `keyring`.
+- `ModelCatalogueEntry` entries are defined in `src/zforge/models/model_catalogue.py` (static catalogue, not persisted).
+- `ModelDownloadService` (`src/zforge/services/model_download_service.py`) streams GGUF files from Hugging Face CDN.
 - `ExperienceGenerationState` (`src/zforge/graphs/state.py`) is the LangGraph TypedDict that drives the multi-agent LLM workflow for experience creation.
 - `CreateWorldState` (`src/zforge/graphs/state.py`) is the LangGraph TypedDict that drives the LLM workflow for world creation.
 - IF engine abstraction: `IfEngineConnector` (`src/zforge/services/if_engine/if_engine_connector.py`) with ink implementation (`src/zforge/services/if_engine/ink_engine_connector.py`).
+- Embedding abstraction: `EmbeddingConnector` (`src/zforge/services/embedding/embedding_connector.py`) with llama.cpp implementation (`src/zforge/services/embedding/llama_cpp_embedding_connector.py`).
+- LLM abstraction: `LlmConnector` (`src/zforge/services/llm/llm_connector.py`) with local llama.cpp implementation (`src/zforge/services/llm/llama_cpp_connector.py`). No cloud LLM providers are used.

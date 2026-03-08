@@ -121,21 +121,27 @@ If no experience is in progress:
 
 ## Application Start
 ### LLM Configuration
-When the user opens the application, the implemented [LLM abstraction layer]("LLM Abstraction Layer.md") will be checked to confirm that its required configuration details are both available and valid. If either fails, the user will be prompted for each required credential, with the existing credentials pre-populated if available, and the name of the LLM/engine used will be shown for clariy. For example, the implemented and selected LLM may be ChatGPT, which requires only a simple API key, so the user would then be prompted "ChatGPT configuration has not been provided. Please enter API Key:". As the LLM abstraction layer allows for arbitrary key/value pairs for configuration, the user will be prompted for as many as the selected implementation requires. When the user submits the new configuration values, they will be tested for validity; if not valid, the user will be told so and to double-check and update them. If valid, they will be stored to secure local storage.
+When the user opens the application, Z-Forge checks whether the configured chat and embedding GGUF model files exist on disk. If either is missing, the user is shown the **LLM Configuration screen** before reaching the home screen.
+
+The screen presents:
+- A **model selector** listing the curated chat models from the [model catalogue](Local%20LLM%20Execution.md#model-catalogue), with the smallest model (DeepSeek R1 Distill 1.5B) pre-selected by default
+- A brief description of the selected model (name and approximate size)
+- A **Download** button that initiates download of the selected chat model and the embedding model simultaneously
+- A **progress indicator** (one bar per file) showing bytes received vs. total; file names are shown alongside each bar
+- A status message that updates as downloads complete; once all files are present, Z-Forge automatically proceeds to the home screen
+
+The downloaded files are saved to `models/` in sandboxed storage (see [File Storage](File%20Storage.md)) and their paths are written to `ZForgeConfig`. No credentials or API keys are required. The screen is also accessible from the main menu to switch to a different model.
 
 ### Player Preferences
 Player preferences, if not already specified, default to 5/10 complexity and 5/10 plot-to-character-development ratio. TODO: In a future version of Z-Forge, the user will be prompted with a series of Ultima-like questions to gauge their preferences.
 
 ## Back-End and Front-End Elements
 ### ZForgeConfig
-A single `ZForgeConfig` is either loaded from insecure storage at application start or created with defaults if unavailable. This includes player preferences as defined in the [spec file](Data%20and%20File%20Specifications.md). On Mac and PC it also includes the path to the user's ZWorld and ink experience storage folders, both of which default to `~/zforge/`. On mobile these are stored in application data; on web, TODO.
+A single `ZForgeConfig` is either loaded from insecure storage at application start or created with defaults if unavailable. This includes player preferences as defined in the [spec file](Data%20and%20File%20Specifications.md), paths to chat and embedding GGUF model files (under `models/`), and model context/GPU settings. On Mac and PC it also includes the path to the user's ZWorld and ink experience storage folders, both of which default to `~/zforge/`. On mobile these are stored in application data; on web, TODO.
 
 `ZForgeConfig` is persisted as a JSON file in the user's config directory, accessed via the Python [`platformdirs`](https://pypi.org/project/platformdirs/) library (e.g., `user_config_dir("zforge")`).
 
-### ZForgeSecureConfig
-A single `ZForgeSecureConfig` is either loaded from secure storage at application start or created empty if unavailable. It holds a dict of `LlmConnectorConfiguration` objects keyed on connector names. Each `LlmConnectorConfiguration` holds whatever key/value pairs that connector requires.
-
-`ZForgeSecureConfig` is persisted using the Python [`keyring`](https://pypi.org/project/keyring/) library, which delegates to the platform native keychain/keystore (see [LLM Abstraction Layer](LLM%20Abstraction%20Layer.md) for platform details). No platform-specific entitlements or manifest changes are required beyond standard BeeWare app configuration.
+> **No secrets stored.** Z-Forge uses only local models and requires no API keys or credentials. `ZForgeSecureConfig` and `keyring` are no longer used.
 
 ### ZWorldManager
 A singleton ZWorldManager object handles CRUD operations on ZWorlds. Create can be invoked with an optional flag (default false) to suppress an event that is normally used to prompt the user to create an experience in the new ZWorld. ZWorld are written in JSON format to the user's ZWorld storage, which is local application storage on mobile or a configured folder on Mac or PC. (On web, TODO.)
@@ -157,17 +163,16 @@ Experiences are enumerated by reading the contents of world subfolders. Given th
 ```mermaid
 flowchart TD
     A[App Launch] --> B[Load ZForgeConfig\nfrom platformdirs JSON file]
-    B --> C[Load ZForgeSecureConfig\nfrom keyring]
-    C --> D{LLM connector\nconfigured?}
-    D -- No --> E[Show LlmConfigScreen\nPrompt for credentials]
-    E --> F{Credentials valid?}
-    F -- No --> E
-    F -- Yes --> G[Store to keyring]
-    G --> H[Show HomeScreen]
-    D -- Yes --> H
-    H --> I{Worlds exist?}
-    I -- No --> J[Show Create World button only]
-    I -- Yes --> K[Show world list\n+ all available buttons]
+    B --> C{Chat + embedding\nmodel files present?}
+    C -- No --> D[Show LlmConfigScreen\nModel picker + Download]
+    D --> E{Downloads\ncomplete?}
+    E -- No --> D
+    E -- Yes --> F[Write model paths\nto ZForgeConfig]
+    F --> G[Show HomeScreen]
+    C -- Yes --> G
+    G --> H{Worlds exist?}
+    H -- No --> I[Show Create World button only]
+    H -- Yes --> J[Show world list\n+ all available buttons]
 ```
 
 ## World Creation Sequence

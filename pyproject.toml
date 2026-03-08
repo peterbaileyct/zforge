@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "zforge"
@@ -14,10 +14,14 @@ dependencies = [
     "langchain>=0.3",
     "langchain-core>=0.3",
     "langchain-openai>=0.2",
+    "langchain-community>=0.3",
     "quickjs>=1.19",
     "keyring>=25.0",
     "platformdirs>=4.0",
     "mcp>=1.0",
+    "lancedb>=0.3",
+    "kuzu>=0.4",
+    "llama-cpp-python>=0.2",
 ]
 
 [project.optional-dependencies]
@@ -47,10 +51,14 @@ requires = [
     "langchain>=0.3",
     "langchain-core>=0.3",
     "langchain-openai>=0.2",
+    "langchain-community>=0.3",
     "quickjs>=1.19",
     "keyring>=25.0",
     "platformdirs>=4.0",
     "mcp>=1.0",
+    "lancedb>=0.3",
+    "kuzu>=0.4",
+    "llama-cpp-python>=0.2",
 ]
 
 [tool.setuptools.packages.find]

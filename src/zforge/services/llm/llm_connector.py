@@ -16,7 +16,7 @@ class LlmConnector(ABC):
 
     @abstractmethod
     def get_name(self) -> str:
-        """Display name of this connector (e.g., 'OpenAI')."""
+        """Display name of this connector (e.g., 'Local LLM (llama.cpp)')."""
 
     @abstractmethod
     def get_config_keys(self) -> list[str]:
@@ -33,3 +33,7 @@ class LlmConnector(ABC):
     @abstractmethod
     def get_model(self) -> BaseChatModel:
         """Return a configured LangChain chat model instance."""
+
+    @abstractmethod
+    def get_context_size(self) -> int:
+        """Return the configured context window size in tokens."""

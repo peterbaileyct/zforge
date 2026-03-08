@@ -17,7 +17,6 @@ from mcp.types import Tool, TextContent
 
 if TYPE_CHECKING:
     from zforge.managers.zworld_manager import ZWorldManager
-    from zforge.models.zworld import ZWorld
 
 
 class ZForgeMcpServer:
@@ -39,20 +38,23 @@ class ZForgeMcpServer:
                     name="CreateZWorld",
                     description=(
                         "Create a ZWorld from the provided properties. "
-                        "See the ZWorld spec for required fields: "
-                        "id, name, locations, characters, relationships, events."
+                        "See docs/Z-World.md for the full specification."
                     ),
                     inputSchema={
                         "type": "object",
                         "properties": {
-                            "id": {"type": "string"},
-                            "name": {"type": "string"},
-                            "locations": {"type": "array"},
+                            "name": {"type": "string", "description": "Display name"},
+                            "summary": {"type": "string", "description": "1-3 paragraph diegetic summary"},
                             "characters": {"type": "array"},
-                            "relationships": {"type": "array"},
+                            "locations": {"type": "array"},
                             "events": {"type": "array"},
+                            "mechanics": {"type": "array", "items": {"type": "string"}},
+                            "tropes": {"type": "array", "items": {"type": "string"}},
+                            "species": {"type": "array", "items": {"type": "string"}},
+                            "occupations": {"type": "array", "items": {"type": "string"}},
+                            "relationships": {"type": "array"},
                         },
-                        "required": ["id", "name"],
+                        "required": ["name", "summary"],
                     },
                 ),
             ]
@@ -70,14 +72,15 @@ class ZForgeMcpServer:
             return [
                 TextContent(type="text", text="ZWorldManager not initialized")
             ]
-        from zforge.models.zworld import ZWorld
+        from zforge.tools.world_tools import world_create_zworld
 
-        zworld = ZWorld.from_dict(arguments)
-        self._zworld_manager.create(zworld)
+        # Delegate to the same tool function used by the LangGraph pipeline
+        result = world_create_zworld.invoke(arguments)
+        title = arguments.get("name", "Unknown")
         return [
             TextContent(
                 type="text",
-                text=f"ZWorld '{zworld.name}' created successfully.",
+                text=f"ZWorld '{title}' created successfully.",
             )
         ]
 

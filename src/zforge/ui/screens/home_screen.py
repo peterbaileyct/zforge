@@ -30,7 +30,7 @@ class HomeScreen:
             style=Pack(flex=1),
             on_select=self._on_world_selected,
         )
-        self._selected_world_id: str | None = None
+        self._selected_world_slug: str | None = None
         self._experience_list = toga.Table(
             headings=["Experience"],
             style=Pack(flex=1),
@@ -63,6 +63,13 @@ class HomeScreen:
         )
         button_row.add(self._btn_create_world)
 
+        self._btn_details = toga.Button(
+            "Details",
+            on_press=self._on_details,
+            style=Pack(padding=5),
+        )
+        button_row.add(self._btn_details)
+
         self._btn_create_experience = toga.Button(
             "Create Experience",
             on_press=self._on_create_experience,
@@ -94,11 +101,13 @@ class HomeScreen:
 
         worlds = mgr.zworld_manager.list_all()
         self._world_list.data.clear()
+        self._worlds = worlds
         for w in worlds:
-            self._world_list.data.append(w.name)
+            self._world_list.data.append(w.title)
 
         has_worlds = len(worlds) > 0
         self._btn_create_experience.enabled = has_worlds
+        self._btn_details.enabled = False
 
         self._refresh_experience_list()
 
@@ -115,8 +124,8 @@ class HomeScreen:
         mgr = self._state.zforge_manager
         if mgr is None:
             return
-        if self._selected_world_id:
-            experiences = mgr.experience_manager.list_for_world(self._selected_world_id)
+        if self._selected_world_slug:
+            experiences = mgr.experience_manager.list_for_world(self._selected_world_slug)
         else:
             experiences = mgr.experience_manager.list_all()
         self._experiences: list = experiences
@@ -126,10 +135,10 @@ class HomeScreen:
     def _on_world_selected(self, widget, **kwargs) -> None:
         row = self._world_list.selection
         if row and self._state.zforge_manager:
-            worlds = self._state.zforge_manager.zworld_manager.list_all()
             idx = self._world_list.data.index(row)
-            if 0 <= idx < len(worlds):
-                self._selected_world_id = worlds[idx].id
+            if 0 <= idx < len(self._worlds):
+                self._selected_world_slug = self._worlds[idx].slug
+                self._btn_details.enabled = True
                 self._refresh_experience_list()
 
     def _on_experience_selected(self, widget, **kwargs) -> None:
@@ -144,10 +153,18 @@ class HomeScreen:
         screen = CreateWorldScreen(self._app, self._state, on_done=self.refresh)
         self._app.main_window.content = screen.box
 
+    def _on_details(self, widget) -> None:
+        if self._selected_world_slug:
+            from zforge.ui.screens.world_details_screen import WorldDetailsScreen
+            screen = WorldDetailsScreen(
+                self._app, self._state, self._selected_world_slug, on_done=self.refresh
+            )
+            self._app.main_window.content = screen.box
+
     def _on_create_experience(self, widget) -> None:
-        if self._selected_world_id and self._state.zforge_manager:
+        if self._selected_world_slug and self._state.zforge_manager:
             zworld = self._state.zforge_manager.zworld_manager.read(
-                self._selected_world_id
+                self._selected_world_slug
             )
             if zworld:
                 from zforge.ui.screens.generate_experience_screen import (

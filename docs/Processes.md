@@ -21,3 +21,16 @@ A procedural generation process is defined in a single Markdown file. The defini
 
 ### Implementation
 Each state machine is defined in LangGraph. Each LLM call in the state machine has a specified default service and model, which may be changed the application config. Each RAG step is either a direct lookup against a vector store or a hybrid lookup of both a vector store and a property graph where each node links to a text chunk in the vector store. See [Storage%20for%20RAG.md] for details.
+
+#### LangGraph tool call pattern
+**Do not use `ToolNode` for tools that update graph state.** In LangGraph 1.x, `ToolNode` stores tool return values as `ToolMessage` content appended to `messages` — it does **not** merge plain-dict returns into other state fields. This causes state mutations (e.g., `status`, `validation_iterations`) to be silently dropped, leaving the graph stuck in a loop.
+
+The correct pattern for every agent node that drives state transitions:
+
+1. Call `model.bind_tools(tools).invoke(...)` to get the LLM response.
+2. Iterate over `response.tool_calls` and call each tool function directly via `tool_fn.invoke(args)`.
+3. Merge each tool's dict return value into the node's own return dict.
+4. Append a `ToolMessage(content=..., tool_call_id=tc["id"], name=tc["name"])` to `messages` for each call, so the message history remains well-formed for the next LLM invocation.
+5. Return all state updates and messages in a single dict from the node — no separate `tools` node or `ToolNode` is needed.
+
+Routing conditional edges are placed directly after agent nodes (not after a shared `tools` node), because the state is now fully updated by the time the node returns.
