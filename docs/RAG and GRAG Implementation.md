@@ -11,10 +11,13 @@ Each Z-Bundle is stored in "bundles/{typeslug}/{slug}", e.g. "bundles/world/wayf
 
 Key-Value data is recorded in "{root}/kvp.json", in JSON format.
 
-Vector stores are recorded in a LanceDB database in "{root}/vector/". Each row has the following columns:
+Vector stores are recorded in a LanceDB database in "{root}/vector/". The LanceDB table within every Z-Bundle is named **`chunks`**. Each row has the following columns:
 - `vector`: embedding array (produced by the [embedding model](Local%20LLM%20Execution.md))
 - `entity_id`: stable string identifier, shared with the property graph node
 - `entity_type`: string label (e.g., `"character"`, `"location"`)
 - `text`: the serialized natural-language chunk text
 
-Property graphs are recorded in a KùzuDB database in "{root}/propertygraph". All entities are stored in a single `Entity` node table (columns: `entity_id`, `entity_type`). Relationships are stored in a single `Relationship` rel table from `Entity` to `Entity` with a `type` string property, so arbitrary relationship types are stored as data rather than requiring schema changes. Each node's `entity_id` matches the corresponding vector store row.
+Property graphs are recorded in a KùzuDB database in `{root}/propertygraph`. The schema is managed entirely by `KuzuGraph.add_graph_documents` (from `langchain_community.graphs`), which creates:
+- **Per-type node tables** — one node table per entity type in `allowed_nodes` (e.g., `Character`, `Location`, `Event`, `Faction`). Node properties include at minimum `id` and `text`.
+- **Per-type-pair relationship tables** — one rel table per (source-type, relationship-type, target-type) triple encountered in the extracted data. The relationship type is encoded in the table name rather than stored as a column.
+- **`Chunk` node table** (when `include_source=True`) — one node per source text chunk, with edges from every extracted entity node back to the chunk it was extracted from, enabling hybrid lookup: given any entity, retrieve the original passage.

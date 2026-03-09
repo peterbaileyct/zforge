@@ -91,6 +91,13 @@ class HomeScreen:
         )
         button_row.add(self._btn_resume)
 
+        self._btn_llm_config = toga.Button(
+            "LLM Configuration",
+            on_press=self._on_llm_config,
+            style=Pack(padding=5),
+        )
+        button_row.add(self._btn_llm_config)
+
         self._box.add(button_row)
 
     def refresh(self) -> None:
@@ -192,6 +199,12 @@ class HomeScreen:
             from zforge.ui.screens.gameplay_screen import GameplayScreen
             screen = GameplayScreen(self._app, self._state, experience=exp, resume=True)
             self._app.main_window.content = screen.box
+
+    def _on_llm_config(self, widget) -> None:
+        from zforge.ui.screens.llm_config_screen import LlmConfigScreen
+
+        screen = LlmConfigScreen(self._app, self._state, on_done=self.refresh)
+        self._app.main_window.content = screen.box
 
     @property
     def box(self) -> toga.Box:

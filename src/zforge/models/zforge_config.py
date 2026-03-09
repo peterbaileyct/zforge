@@ -44,6 +44,24 @@ class PlayerPreferences:
 
 
 @dataclass
+class LlmNodeConfig:
+    """Provider/model pair for a single LLM graph node."""
+
+    provider: str = ""
+    model: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"provider": self.provider, "model": self.model}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> LlmNodeConfig:
+        return cls(
+            provider=data.get("provider", ""),
+            model=data.get("model", ""),
+        )
+
+
+@dataclass
 class ZForgeConfig:
     """Application configuration persisted as JSON via platformdirs."""
 
@@ -57,8 +75,19 @@ class ZForgeConfig:
     embedding_context_size: int = 512
     embedding_gpu_layers: int = 0
     preferences: PlayerPreferences = field(default_factory=PlayerPreferences)
+    llm_nodes: dict[str, dict[str, LlmNodeConfig]] = field(
+        default_factory=dict
+    )
+    parsing_chunk_size: int = 10000
+    parsing_chunk_overlap: int = 500
 
     def to_dict(self) -> dict[str, Any]:
+        llm_nodes_dict: dict[str, Any] = {}
+        for process_slug, nodes in self.llm_nodes.items():
+            llm_nodes_dict[process_slug] = {
+                node_slug: node_cfg.to_dict()
+                for node_slug, node_cfg in nodes.items()
+            }
         return {
             "bundles_root": self.bundles_root,
             "experience_folder": self.experience_folder,
@@ -70,11 +99,21 @@ class ZForgeConfig:
             "embedding_context_size": self.embedding_context_size,
             "embedding_gpu_layers": self.embedding_gpu_layers,
             "preferences": self.preferences.to_dict(),
+            "llm_nodes": llm_nodes_dict,
+            "parsing_chunk_size": self.parsing_chunk_size,
+            "parsing_chunk_overlap": self.parsing_chunk_overlap,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ZForgeConfig:
         prefs_data = data.get("preferences", {})
+        llm_nodes_raw = data.get("llm_nodes", {})
+        llm_nodes: dict[str, dict[str, LlmNodeConfig]] = {}
+        for process_slug, nodes_data in llm_nodes_raw.items():
+            llm_nodes[process_slug] = {
+                node_slug: LlmNodeConfig.from_dict(node_data)
+                for node_slug, node_data in nodes_data.items()
+            }
         return cls(
             bundles_root=data.get("bundles_root", ""),
             experience_folder=data.get("experience_folder", ""),
@@ -86,4 +125,7 @@ class ZForgeConfig:
             embedding_context_size=data.get("embedding_context_size", 512),
             embedding_gpu_layers=data.get("embedding_gpu_layers", 0),
             preferences=PlayerPreferences.from_dict(prefs_data),
+            llm_nodes=llm_nodes,
+            parsing_chunk_size=data.get("parsing_chunk_size", 10000),
+            parsing_chunk_overlap=data.get("parsing_chunk_overlap", 500),
         )

@@ -24,7 +24,11 @@ from zforge.services.embedding.llama_cpp_embedding_connector import (
     LlamaCppEmbeddingConnector,
 )
 from zforge.services.if_engine.ink_engine_connector import InkEngineConnector
+from zforge.services.llm.anthropic_connector import AnthropicConnector
+from zforge.services.llm.connector_registry import ConnectorRegistry
+from zforge.services.llm.google_connector import GoogleConnector
 from zforge.services.llm.llama_cpp_connector import LlamaCppConnector
+from zforge.services.llm.openai_connector import OpenAiConnector
 
 
 class ZForgeApp(toga.App):
@@ -39,17 +43,41 @@ class ZForgeApp(toga.App):
 
         # Initialize services
         config_service = ConfigService()
+        config_exists = config_service.exists()
+        has_llm_config = config_service.has_llm_config()
         config = config_service.load()
 
         self._app_state.config_service = config_service
 
-        # Initialize LLM connector (local GGUF model)
+        # Initialize LLM connector registry with all available connectors
+        registry = ConnectorRegistry()
+
+        # Local connector (llama.cpp)
         llm_connector = LlamaCppConnector(
             model_path=config.chat_model_path,
             context_size=config.chat_context_size,
             gpu_layers=config.chat_gpu_layers,
         )
+        registry.register(llm_connector)
+
+        # Remote connectors — load credentials from keyring
+        openai_connector = OpenAiConnector()
+        openai_connector.load_from_keyring()
+        registry.register(openai_connector)
+
+        google_connector = GoogleConnector()
+        google_connector.load_from_keyring()
+        registry.register(google_connector)
+
+        anthropic_connector = AnthropicConnector()
+        anthropic_connector.load_from_keyring()
+        registry.register(anthropic_connector)
+
+        # OpenAI is the default provider for world generation
+        registry.set_default("OpenAI")
+
         self._app_state.llm_connector = llm_connector
+        self._app_state.connector_registry = registry
 
         # Initialize embedding connector
         embedding_connector = LlamaCppEmbeddingConnector(
@@ -73,16 +101,21 @@ class ZForgeApp(toga.App):
             zworld_manager=zworld_manager,
             experience_manager=experience_manager,
             llm_connector=llm_connector,
+            connector_registry=registry,
+            config=config,
             if_engine_connector=if_engine,
         )
         self._app_state.zforge_manager = zforge_manager
 
-        # Show LLM config if either model is missing; otherwise home
-        if llm_connector.validate() and embedding_connector.validate():
+        # Show LLM config on first run (no file) or no llm_nodes section;
+        # also show if either local connector is broken.
+        if not config_exists or not has_llm_config:
+            self._show_llm_config(show_no_config_message=True)
+        elif llm_connector.validate() and embedding_connector.validate():
             asyncio.ensure_future(self._prewarm_llm(llm_connector))
             self._show_home()
         else:
-            self._show_llm_config()
+            self._show_llm_config(show_no_config_message=False)
 
         self.main_window.show()
 
@@ -112,10 +145,11 @@ class ZForgeApp(toga.App):
         screen.refresh()
         self.main_window.content = screen.box
 
-    def _show_llm_config(self) -> None:
+    def _show_llm_config(self, show_no_config_message: bool = False) -> None:
         from zforge.ui.screens.llm_config_screen import LlmConfigScreen
 
         screen = LlmConfigScreen(
-            self, self._app_state, on_done=self._show_home
+            self, self._app_state, on_done=self._show_home,
+            show_no_config_message=show_no_config_message,
         )
         self.main_window.content = screen.box

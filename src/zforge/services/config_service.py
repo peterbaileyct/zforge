@@ -12,7 +12,8 @@ from pathlib import Path
 
 from platformdirs import user_config_dir
 
-from zforge.models.zforge_config import ZForgeConfig
+from zforge.models.process_config import PROCESSES
+from zforge.models.zforge_config import LlmNodeConfig, ZForgeConfig
 
 
 _CONFIG_DIR = user_config_dir("zforge")
@@ -36,6 +37,22 @@ class ConfigService:
         self._apply_defaults(config)
         return config
 
+    def exists(self) -> bool:
+        """Return True if a configuration file already exists on disk."""
+        return self._config_path.exists()
+
+    def has_llm_config(self) -> bool:
+        """Return True if the on-disk config has a non-empty llm_nodes section."""
+        if not self._config_path.exists():
+            return False
+        try:
+            with open(self._config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            nodes = data.get("llm_nodes", {})
+            return bool(nodes)
+        except Exception:
+            return False
+
     def save(self, config: ZForgeConfig) -> None:
         """Save config to disk."""
         os.makedirs(self._config_path.parent, exist_ok=True)
@@ -55,3 +72,13 @@ class ConfigService:
         _MIN_CONTEXT_SIZE = 4096
         if config.chat_context_size < _MIN_CONTEXT_SIZE:
             config.chat_context_size = 8192
+
+        # Ensure per-node LLM defaults exist for every known process/node.
+        for proc in PROCESSES:
+            proc_nodes = config.llm_nodes.setdefault(proc.slug, {})
+            for node in proc.nodes:
+                if node.slug not in proc_nodes:
+                    proc_nodes[node.slug] = LlmNodeConfig(
+                        provider=node.default_provider,
+                        model=node.default_model,
+                    )

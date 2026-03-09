@@ -99,14 +99,27 @@ class ZWorldManager:
         import pyarrow as pa
 
         entities = zworld.all_entities()
+        log.info("_write_vector_store: %d entities for %s", len(entities), zworld.slug)
         if not entities:
             log.warning("ZWorldManager: no entities to embed for %s", zworld.slug)
             return
 
         texts = [e[3] for e in entities]
+        log.info("_write_vector_store: calling get_embeddings()")
         embeddings_model = self._embedding.get_embeddings()
-        vectors = embeddings_model.embed_documents(texts)
+        log.info("_write_vector_store: embedding %d texts", len(texts))
+        # embed_documents() submits all texts as one llama-cpp batch, which
+        # causes "invalid seq_id[N][0] = 1 >= 1" / encode failure when the
+        # number of entities exceeds the context's sequence-slot limit.
+        # Embedding one text at a time via embed_query() is safe for any size.
+        vectors = [embeddings_model.embed_query(t) for t in texts]
+        log.info(
+            "_write_vector_store: embeddings done — sample dim=%s, type=%s",
+            len(vectors[0]) if vectors else "N/A",
+            type(vectors[0]).__name__ if vectors else "N/A",
+        )
 
+        log.info("_write_vector_store: connecting to lancedb at %s", root / "vector")
         db = lancedb.connect(str(root / "vector"))
         data = [
             {
@@ -117,12 +130,15 @@ class ZWorldManager:
             }
             for i in range(len(entities))
         ]
+        log.info("_write_vector_store: calling create_table with %d rows", len(data))
         db.create_table("entities", data, mode="overwrite")
+        log.info("_write_vector_store: done")
 
     def _write_property_graph(self, root: Path, zworld: ZWorld) -> None:
         import kuzu
 
         graph_dir = root / "propertygraph"
+        log.info("_write_property_graph: writing to %s", graph_dir)
         os.makedirs(graph_dir, exist_ok=True)
         db = kuzu.Database(str(graph_dir))
         conn = kuzu.Connection(db)
@@ -137,12 +153,14 @@ class ZWorldManager:
         )
 
         entities = zworld.all_entities()
+        log.info("_write_property_graph: inserting %d entities", len(entities))
         for eid, etype, _, _ in entities:
             conn.execute(
                 "MERGE (e:Entity {entity_id: $id}) SET e.entity_type = $type",
                 parameters={"id": eid, "type": etype},
             )
 
+        log.info("_write_property_graph: inserting %d relationships", len(zworld.relationships))
         for rel in zworld.relationships:
             conn.execute(
                 "MATCH (a:Entity {entity_id: $from_id}), "
@@ -154,6 +172,7 @@ class ZWorldManager:
                     "type": rel.type,
                 },
             )
+        log.info("_write_property_graph: done")
 
     # ------------------------------------------------------------------
     # READ

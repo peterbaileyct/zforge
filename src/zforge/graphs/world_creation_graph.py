@@ -90,7 +90,7 @@ _REJECTION_SYSTEM_PROMPT = (
     "Please explain clearly why the text is inadequate or inappropriate "
     "as a fictional world description."
 )
-_LLM_TIMEOUT_SECONDS = 30
+_LLM_TIMEOUT_SECONDS = 180
 
 _DESIGNER_JSON_SUFFIX = """
 
@@ -131,7 +131,10 @@ def _make_chunker_node(context_size: int):
             len(chunks),
             max_chars,
         )
-        return {"input_chunks": chunks}
+        return {
+            "input_chunks": chunks,
+            "status_message": "Validating world description...",
+        }
 
     return chunker_node
 
@@ -174,12 +177,17 @@ def _parse_validation_response(content: str) -> bool | None:
     return None
 
 
-def _make_editor_node(llm_connector: LlmConnector):
+def _make_editor_node(llm_connector: LlmConnector, model_name: str | None = None):
     """Return an editor node that parses plain-text responses instead of tool calls."""
-    model = llm_connector.get_model()
+    # Lazy: get_model() is deferred to first invocation so that graph build
+    # does not trigger a potentially blocking network call on construction.
+    _model_cache: list = []
 
     @log_node("editor")
     def editor_node(state: CreateWorldState) -> dict:
+        if not _model_cache:
+            _model_cache.append(llm_connector.get_model(model_name))
+        model = _model_cache[0]
         status = state["status"]
         validation_count = state.get("validation_iterations", 0)
         # Validate against the first chunk only — the editor just needs a
@@ -278,42 +286,46 @@ def _make_editor_node(llm_connector: LlmConnector):
     return editor_node
 
 
-def _make_designer_node(llm_connector: LlmConnector):
-    """Return a designer node that parses JSON output with a timeout."""
-    model = llm_connector.get_model()
+_DESIGNER_MAX_WORKERS = 16  # Cap parallel LLM threads for rate-limit safety.
 
-    @log_node("designer")
-    def designer_node(state: CreateWorldState) -> dict:
-        import json
-        import re
 
-        chunks = state.get("input_chunks") or [state["input_text"]]
-        idx = state.get("current_chunk_index", 0)
-        total = len(chunks)
-        chunk = chunks[idx]
+def _make_designer_node(llm_connector: LlmConnector, model_name: str | None = None):
+    """Return a designer node that processes all remaining chunks in parallel.
 
-        if total > 1:
-            chunk_annotation = _DESIGNER_CHUNK_SUFFIX.format(
-                chunk_num=idx + 1, total_chunks=total
-            )
-        else:
-            chunk_annotation = ""
+    All chunks are independent extractions, so they are submitted to a
+    ThreadPoolExecutor simultaneously.  The node advances current_chunk_index
+    past every remaining chunk in one step, so the router always goes directly
+    to finalize rather than looping back.
+    """
+    import json
+    import re
 
+    # Lazy: get_model() is deferred to first invocation so that graph build
+    # does not trigger a potentially blocking network call on construction.
+    _model_cache: list = []
+
+    def _get_model():
+        if not _model_cache:
+            _model_cache.append(llm_connector.get_model(model_name))
+        return _model_cache[0]
+
+    def _process_one_chunk(
+        chunk: str, chunk_num: int, total: int
+    ) -> tuple[dict | None, object | None]:
+        """Call the LLM for a single chunk. Returns (partial_dict, response) or (None, None)."""
+        annotation = (
+            _DESIGNER_CHUNK_SUFFIX.format(chunk_num=chunk_num, total_chunks=total)
+            if total > 1
+            else ""
+        )
         system = (
-            _DESIGNER_SYSTEM_PROMPT_TEMPLATE.format(
-                input_text=chunk + chunk_annotation
-            )
+            _DESIGNER_SYSTEM_PROMPT_TEMPLATE.format(input_text=chunk + annotation)
             + _DESIGNER_JSON_SUFFIX
         )
-        log.info(
-            "designer_node: processing chunk %d/%d (%d chars)",
-            idx + 1,
-            total,
-            len(chunk),
-        )
+        log.info("designer_node: chunk %d/%d — %d chars", chunk_num, total, len(chunk))
         try:
             response = _invoke_llm_with_timeout(
-                model,
+                _get_model(),
                 [
                     SystemMessage(content=system),
                     HumanMessage(content="Build the specified ZWorld. Respond ONLY with the JSON object."),
@@ -321,21 +333,14 @@ def _make_designer_node(llm_connector: LlmConnector):
                 _LLM_TIMEOUT_SECONDS,
             )
         except TimeoutError as exc:
-            log.warning("designer_node: LLM call timed out — %s", exc)
-            return {
-                "status": "failed",
-                "failure_reason": "LLM call timed out",
-                "status_message": "World creation paused: LLM timeout",
-            }
+            log.warning("designer_node: chunk %d/%d timed out — %s", chunk_num, total, exc)
+            return None, None
 
         content = str(getattr(response, "content", ""))
         log.info(
-            "designer_node: LLM responded — content length=%d  preview: %r",
-            len(content),
-            content[:300],
+            "designer_node: chunk %d/%d responded — length=%d  preview: %r",
+            chunk_num, total, len(content), content[:300],
         )
-
-        state_updates: dict = {}
 
         parsed = None
         fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
@@ -362,13 +367,14 @@ def _make_designer_node(llm_connector: LlmConnector):
 
         if parsed and isinstance(parsed, dict):
             log.info(
-                "designer_node: parsed JSON — name=%r  chars=%d  locs=%d  rels=%d",
+                "designer_node: chunk %d/%d parsed — name=%r  chars=%d  locs=%d  rels=%d",
+                chunk_num, total,
                 parsed.get("name"),
                 len(parsed.get("characters", [])),
                 len(parsed.get("locations", [])),
                 len(parsed.get("relationships", [])),
             )
-            partial = {
+            return {
                 "name": parsed.get("name", "Unknown World"),
                 "summary": parsed.get("summary", ""),
                 "characters": parsed.get("characters", []),
@@ -379,19 +385,69 @@ def _make_designer_node(llm_connector: LlmConnector):
                 "species": parsed.get("species", []),
                 "occupations": parsed.get("occupations", []),
                 "relationships": parsed.get("relationships", []),
-            }
-            state_updates["partial_zworlds"] = [partial]
-            state_updates["current_chunk_index"] = 1
-            state_updates["status"] = "awaiting_generation"
-            state_updates["status_message"] = f"Extracted entities from chunk for '{partial['name']}'"
+            }, response
         else:
             log.warning(
-                "designer_node: could not parse JSON from LLM response — skipping chunk %d",
-                idx,
+                "designer_node: could not parse JSON from chunk %d — skipping", chunk_num
             )
-            state_updates["current_chunk_index"] = 1
+            return None, response
 
-        return {"messages": [response], **state_updates}
+    @log_node("designer")
+    def designer_node(state: CreateWorldState) -> dict:
+        chunks = state.get("input_chunks") or [state["input_text"]]
+        start_idx = state.get("current_chunk_index", 0)
+        total = len(chunks)
+        remaining = chunks[start_idx:]
+
+        log.info(
+            "designer_node: processing %d remaining chunk(s) (of %d total) in parallel",
+            len(remaining), total,
+        )
+
+        partials: list[dict] = []
+        responses: list = []
+
+        workers = min(len(remaining), _DESIGNER_MAX_WORKERS)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            future_map = {
+                executor.submit(_process_one_chunk, chunk, start_idx + i + 1, total): i
+                for i, chunk in enumerate(remaining)
+            }
+            for future in concurrent.futures.as_completed(future_map):
+                partial, response = future.result()
+                if response is not None:
+                    responses.append(response)
+                if partial is not None:
+                    partials.append(partial)
+
+        # Advance current_chunk_index past ALL remaining chunks in one step.
+        # current_chunk_index uses operator.add, so returning len(remaining) as
+        # the delta advances start_idx → start_idx + len(remaining) == total,
+        # which causes _route_after_designer to go directly to "finalize".
+        if not partials:
+            log.warning("designer_node: no chunks produced valid JSON")
+            return {
+                "status": "failed",
+                "failure_reason": "LLM call timed out",
+                "status_message": "World creation paused: LLM timeout",
+                "current_chunk_index": len(remaining),
+            }
+
+        first_name = partials[0].get("name", "Unknown World")
+        log.info(
+            "designer_node: %d/%d chunk(s) succeeded — name=%r",
+            len(partials), len(remaining), first_name,
+        )
+        return {
+            "messages": responses,
+            "partial_zworlds": partials,
+            "current_chunk_index": len(remaining),
+            "status": "awaiting_generation",
+            "status_message": (
+                f"Extracted entities from {len(partials)}/{len(remaining)} "
+                f"chunk(s) for '{first_name}'"
+            ),
+        }
 
     return designer_node
 
@@ -588,16 +644,30 @@ def _route_after_designer(state: CreateWorldState) -> str:
 # --- Graph Builder ---
 
 
-def build_create_world_graph(llm_connector: LlmConnector):
-    """Build and compile the world creation LangGraph StateGraph."""
-    context_size = llm_connector.get_context_size()
+def build_create_world_graph(
+    editor_connector: LlmConnector,
+    designer_connector: LlmConnector,
+    editor_model: str | None = None,
+    designer_model: str | None = None,
+):
+    """Build and compile the world creation LangGraph StateGraph.
+
+    Parameters
+    ----------
+    editor_connector / designer_connector:
+        Per-node LLM connectors resolved from the ``llm_nodes`` config.
+    editor_model / designer_model:
+        Model name overrides passed to the respective connector's
+        ``get_model()`` method.  *None* uses the connector default.
+    """
+    context_size = editor_connector.get_context_size()
     log.info("build_create_world_graph: context_size=%d", context_size)
 
     graph = StateGraph(CreateWorldState)
 
     graph.add_node("chunker", _make_chunker_node(context_size))
-    graph.add_node("editor", _make_editor_node(llm_connector))
-    graph.add_node("designer", _make_designer_node(llm_connector))
+    graph.add_node("editor", _make_editor_node(editor_connector, editor_model))
+    graph.add_node("designer", _make_designer_node(designer_connector, designer_model))
     graph.add_node("finalize", _make_finalizer_node())
 
     graph.set_entry_point("chunker")

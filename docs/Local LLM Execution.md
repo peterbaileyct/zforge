@@ -1,6 +1,6 @@
 # Local LLM Execution
 
-Z-Forge supports running GGUF-based inference locally as an optional offline path alongside the remote connectors described in [LLM Abstraction Layer](LLM%20Abstraction%20Layer.md). The world generation process defaults to the remote gpt-5 nano model, but local connectors remain available when the user explicitly selects an on-device model (for offline, privacy-sensitive, or low-latency scenarios). This document describes those local connectors and their role in chat inference and embedding generation.
+Z-Forge supports running GGUF-based inference locally as an optional offline path alongside the remote connectors described in [LLM Abstraction Layer](LLM%20Abstraction%20Layer.md). The world generation process defaults to the remote `gpt-5-nano` model, but local connectors remain available when the user explicitly selects an on-device model (for offline, privacy-sensitive, or low-latency scenarios). This document describes those local connectors and their role in chat inference and embedding generation.
 
 ## Use Cases
 
@@ -106,3 +106,41 @@ Re-encoding (running world generation again on the same input to rebuild the Z-B
 - `EmbeddingConnector` (ABC) and `LlamaCppEmbeddingConnector` live in `src/zforge/services/embedding/`
 - Model catalogue is a static data structure in `src/zforge/models/model_catalogue.py` — a list of `ModelCatalogueEntry` dataclasses with fields: `role` (chat/embedding), `display_name`, `hf_repo`, `filename`, `size_bytes_approx`, `is_default`
 - Download logic lives in `src/zforge/services/model_download_service.py`. It streams the HF CDN URL with `httpx` (async) and writes to `{user_data_dir}/models/{filename}`, reporting byte progress via a callback so the UI can update a progress bar. No auth token is required for these public models.
+
+### Pitfall: `LlamaCppEmbeddings.embed_documents()` batch crash
+
+`LlamaCppEmbeddings.embed_documents(texts)` submits the entire list as a single llama-cpp batch decode. When the number of texts exceeds the context's internal sequence-slot limit, llama-cpp raises:
+
+```
+decode: cannot decode batches with this context (calling encode() instead)
+init: invalid seq_id[N][0] = 1 >= 1
+encode: failed to initialize batch
+llama_decode: failed to decode, ret = -1
+```
+
+**Correct pattern:** call `embed_query(text)` in a loop — one text at a time. This is safe regardless of entity count:
+
+```python
+vectors = [embeddings_model.embed_query(t) for t in texts]
+```
+
+Never call `embed_documents(texts)` with a non-trivial list against a local llama-cpp embedding model. The limit is context-slot-count – 1 (often as few as 1 usable slot for embedding contexts), so even small worlds will fail.
+
+### Pitfall: Cloud LLM wrappers block on construction — defer `get_model()` to first invocation
+
+`langchain-google-genai`'s `ChatGoogleGenerativeAI()` (and equivalent LangChain wrappers for other cloud providers) may make a network call during `__init__` to validate the model or fetch endpoint metadata. When a node factory calls `get_model()` eagerly — at LangGraph **graph-build time** — this call blocks the asyncio event loop: no graph nodes ever run and the UI freezes with no further log output.
+
+**Correct pattern:** defer `get_model()` to the first node invocation using a closure cache:
+
+```python
+def _make_my_node(connector, model_name):
+    _model_cache: list = []
+    def node(state):
+        if not _model_cache:
+            _model_cache.append(connector.get_model(model_name))
+        model = _model_cache[0]
+        ...
+    return node
+```
+
+Never call `get_model()` (or any connector method that instantiates a cloud LLM) at node-factory time — only at node-execution time.

@@ -67,6 +67,7 @@ class LlamaCppEmbeddingConnector(EmbeddingConnector):
             model_path=str(path),
             n_ctx=self._context_size,
             n_gpu_layers=self._gpu_layers,
+            verbose=False,
         )
 
     def model_identity(self) -> dict:

@@ -53,6 +53,12 @@ class LlamaCppConnector(LlmConnector):
     def get_config_keys(self) -> list[str]:
         return ["model_path"]
 
+    def get_available_models(self) -> list[str]:
+        """Return the configured model path as the only available model."""
+        if self._model_path:
+            return [self._model_path]
+        return []
+
     def load_from_keyring(self) -> None:
         # No secrets — model path comes from config, not keyring.
         pass
@@ -72,8 +78,12 @@ class LlamaCppConnector(LlmConnector):
         """Return the configured context window size in tokens."""
         return self._context_size
 
-    def get_model(self) -> BaseChatModel:
-        """Return a LangChain ChatLlamaCpp instance (cached after first load)."""
+    def get_model(self, model_name: str | None = None) -> BaseChatModel:
+        """Return a LangChain ChatLlamaCpp instance (cached after first load).
+
+        The *model_name* parameter is accepted for ABC compliance but
+        ignored — the local connector always uses the configured GGUF path.
+        """
         if self._model is not None:
             return self._model
         from langchain_community.chat_models import ChatLlamaCpp
@@ -84,6 +94,7 @@ class LlamaCppConnector(LlmConnector):
             model_path=str(path),
             n_ctx=self._context_size,
             n_gpu_layers=self._gpu_layers,
+            verbose=False,
         )
         log.info("LlamaCppConnector.get_model: model loaded")
         return self._model

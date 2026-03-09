@@ -119,8 +119,14 @@ If no experience is in progress:
  If progress within an experience has been saved, but that experience was not successfully completed before the last time Z-Forge was closed, the user will be asked if they want to continue {name of experience} at application start.
  In addition to their usual places in the main menu, buttons will appear offering the options to "Create World" and, if there is at least one ZWorld available, "Create Experience", and, if there is at least one experience available, "Start Experience" and, if there is at least one saved progress available within an experience, "Resume Experience".
 
+That same action row now keeps an "LLM Configuration" button in view so the user can reopen the model download/configuration workflow at any time; see [src/zforge/ui/screens/home_screen.py](src/zforge/ui/screens/home_screen.py#L58-L207).
+
 ## LLM Configuration
-LLM configuration is a crucial element of the [app config](Application%20Configuration.md). The user is able to specify the provider and model for each LLM node in each [Process](Processes.md). When viewing the LLM configuration screen, the user will see a collabsible display of Processes with their LLM Nodes; for each node, they can select a Provider (from among all available LLM Connectors) and a model (from among the models available for the chosen Connector). If no value, or an invalid value, already exists in the application config for a given node, it will be defaulted to the provider and model listed in the specification for that node of that Process. After the user updates the LLM configuration, the app will check that all required configuration values have been provided for all the selected providers across all nodes; if not, they will be prompted for these configuration values as defined in the LLM Connector Configuraiton section.
+LLM configuration is a crucial element of the [app config](Application%20Configuration.md). The user is able to specify the provider and model for each LLM node in each [Process](Processes.md). When viewing the LLM configuration screen, the user will see a display of Processes with their LLM Nodes; for each node, they can select a Provider (from among all available LLM Connectors) and a model (from among the models available for the chosen Connector). If no value, or an invalid value, already exists in the application config for a given node, it will be defaulted to the provider and model listed in the specification for that node of that Process. After the user updates the LLM configuration, the app will check that all required configuration values have been provided for all the selected providers across all nodes; if not, they will be prompted for these configuration values as defined in the LLM Connector Configuration section.
+
+Below the node configuration section, the screen also shows the **Provider Configuration** section (API keys for each remote connector) and the **Local Model** section (GGUF download). A **"Use Defaults"** button proceeds without saving; **"Save"** writes node config to `zforge_config.json` and API keys to the platform keyring before returning to the home screen ([src/zforge/ui/screens/llm_config_screen.py](src/zforge/ui/screens/llm_config_screen.py)).
+
+Process / node metadata (slugs, display names, and per-node defaults) is maintained as a single source of truth in [src/zforge/models/process_config.py](src/zforge/models/process_config.py) and consumed by both `ConfigService._apply_defaults` and `LlmConfigScreen`.
 
 ## LLM Connector Configuration
 When viewing the LLM Connector configuration screen, the user will see a collabsible display of all available Connectors that have been selected for at least one node, with their required configuration elements, including configured values. The user can update these values. When the user attempts to save the updated values, the connectors will check their validity. If any are not valid, the page will remain open with the problematic connector and, if possible, the specific configuration value(s) identified with an error message and color-coding in red.
@@ -131,9 +137,11 @@ Below the API connectors, there will be an additional section for local LLMs. Th
 On the Embedding Model configuration screen, the user is able to select the preferred embedding model from among those already downloaded. They can also download a new embedding model from the [model catalogue](Local%20LLM%20Execution.md#model-catalogue).
 
 ## Application Start
-At application start, the configuration will be checked for completeness and validity. If there is no configuration file, or it has no LLM configuration section, the user will immediately be prompted that no LLM configuration was found, and asked if they want to provide details or accept defaults, with the latter being the default. 
+At application start, the configuration will be checked for completeness and validity. If there is no configuration file, or it has no LLM configuration section (`llm_nodes` absent or empty in the JSON), the LLM Configuration screen is shown immediately with an explanatory message. The screen's **"Use Defaults"** button lets the user skip directly to the home screen while accepting the default provider/model values. **"Save"** saves configuration changes first.
 
-If the user declines to open the LLM configuration, the app will go on to validate the LLM connector configuration as described in the LLM Connector Configuration section. If it is invalid, the user will be shown the LLM Connector configuration, as described above. There is one exception: If any connectors are used but their configuration values are simply absent, no attempt will be made to validate the configuration with the provider, and the user will see a more neutral message indicating that the configuration needs to be specified and not that it is invalid.
+If a valid config file with an `llm_nodes` section already exists, the app validates the local connectors. If either local model file is missing, the LLM Configuration screen is shown without the "no config found" message. Otherwise, the home screen is shown and the local LLM is pre-warmed in the background.
+
+Implementation: `ConfigService.has_llm_config()` reads the raw JSON to check for a non-empty `llm_nodes` key ([src/zforge/services/config_service.py](src/zforge/services/config_service.py)); startup routing lives in `ZForgeApp.startup` ([src/zforge/app.py](src/zforge/app.py#L41-L120)).
 
 ## World Details Screen
 When the user selects a world from the home screen, a **Details** button becomes enabled alongside the existing action buttons. Tapping it navigates to `WorldDetailsScreen`.
@@ -170,3 +178,7 @@ sequenceDiagram
     U->>WD: Enter question, tap "Ask"
     WD-->>U: Display "TODO"
 ```
+
+## Future Configuration
+
+- **TODO:** Expose `parsing_chunk_size` and `parsing_chunk_overlap` as user-configurable settings in the LLM / Advanced Configuration screen. Currently these are application-level defaults (see [Parsing Documents to Z-Bundles](Parsing%20Documents%20to%20Z-Bundles.md#implementation)) with no UI affordance.

@@ -20,9 +20,10 @@ from zforge.graphs.experience_generation_graph import (
 from zforge.graphs.world_creation_graph import build_create_world_graph
 from zforge.managers.experience_manager import ExperienceManager
 from zforge.managers.zworld_manager import ZWorldManager
-from zforge.models.zforge_config import PlayerPreferences
+from zforge.models.zforge_config import PlayerPreferences, ZForgeConfig
 from zforge.models.zworld import ZWorld
 from zforge.services.if_engine.if_engine_connector import IfEngineConnector
+from zforge.services.llm.connector_registry import ConnectorRegistry
 from zforge.services.llm.llm_connector import LlmConnector
 from zforge.tools.experience_tools import set_if_engine_connector
 from zforge.tools.world_tools import set_zworld_manager
@@ -36,11 +37,15 @@ class ZForgeManager:
         zworld_manager: ZWorldManager,
         experience_manager: ExperienceManager,
         llm_connector: LlmConnector,
+        connector_registry: ConnectorRegistry,
+        config: ZForgeConfig,
         if_engine_connector: IfEngineConnector,
     ) -> None:
         self.zworld_manager = zworld_manager
         self.experience_manager = experience_manager
         self._llm_connector = llm_connector
+        self._connector_registry = connector_registry
+        self._config = config
         self._if_engine_connector = if_engine_connector
         self._world_creation_graph = None
 
@@ -112,6 +117,32 @@ class ZForgeManager:
         log.info("run_process: finished — final status=%r", final_state.get("status"))
         return final_state
 
+    def _resolve_node_connector(
+        self, process_slug: str, node_slug: str
+    ) -> tuple[LlmConnector, str | None]:
+        """Resolve the LlmConnector and model name for a specific graph node.
+
+        Falls back to the default connector when the configured provider
+        is not found in the registry.
+        """
+        wg_nodes = self._config.llm_nodes.get(process_slug, {})
+        node_cfg = wg_nodes.get(node_slug)
+        if node_cfg and node_cfg.provider:
+            connector = self._connector_registry.get(node_cfg.provider)
+            if connector is not None:
+                model = node_cfg.model or None
+                log.info(
+                    "_resolve_node_connector: %s.%s → provider=%r model=%r",
+                    process_slug, node_slug, node_cfg.provider, model,
+                )
+                return connector, model
+            log.warning(
+                "_resolve_node_connector: configured provider %r for %s.%s "
+                "not found in registry — falling back to default",
+                node_cfg.provider, process_slug, node_slug,
+            )
+        return self._connector_registry.get_default(), None
+
     async def start_world_creation(
         self,
         input_text: str,
@@ -120,7 +151,18 @@ class ZForgeManager:
         """Run the world creation process."""
         if self._world_creation_graph is None:
             log.info("start_world_creation: building graph (first call)")
-            self._world_creation_graph = build_create_world_graph(self._llm_connector)
+            editor_connector, editor_model = self._resolve_node_connector(
+                "world_generation", "editor"
+            )
+            designer_connector, designer_model = self._resolve_node_connector(
+                "world_generation", "designer"
+            )
+            self._world_creation_graph = build_create_world_graph(
+                editor_connector=editor_connector,
+                designer_connector=designer_connector,
+                editor_model=editor_model,
+                designer_model=designer_model,
+            )
         graph = self._world_creation_graph
         initial_state = {
             "input_text": input_text,

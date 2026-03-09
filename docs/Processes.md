@@ -22,6 +22,8 @@ A procedural generation process is defined in a single Markdown file. The defini
 ### Implementation
 Each state machine is defined in LangGraph. Each LLM call in the state machine has a specified default service and model, which may be changed the application config. Each RAG step is either a direct lookup against a vector store or a hybrid lookup of both a vector store and a property graph where each node links to a text chunk in the vector store. See [Storage%20for%20RAG.md] for details.
 
+Each process and each LLM node within it carries a **slug** — a stable, kebab-case string identifier (e.g. `world_generation`, `contextualizer`). Slugs are used as config keys to store and retrieve per-node provider/model overrides in `zforge_config.json`. The canonical registry of all process and node slugs, along with their default providers and models, lives in `src/zforge/models/process_config.py`. Process spec files (such as [World Generation](World%20Generation.md)) reference their slug in the `## Implementation` section to tie documentation to this registry.
+
 #### LangGraph tool call pattern
 **Do not use `ToolNode` for tools that update graph state.** In LangGraph 1.x, `ToolNode` stores tool return values as `ToolMessage` content appended to `messages` — it does **not** merge plain-dict returns into other state fields. This causes state mutations (e.g., `status`, `validation_iterations`) to be silently dropped, leaving the graph stuck in a loop.
 

@@ -19,6 +19,9 @@ Where helpful, documentation should illustrate functions and use cases in which 
 
 Any code changes should be mirrored in changes to/creation of Mermaid ER diagrams in the docs folder. ER diagrams are maintained for **human consumption only** — neither the Silicon Lead nor the outsource team references them when writing or reviewing code. The Silicon Lead updates ER diagrams when making small edits; the outsource team updates ER diagrams as part of their larger implementation work. In neither case are ER diagrams used as an input to implementation decisions.
 
+## Library Usage and Documentation
+This application uses third-party libraries listed in [docs/Libraries.md]. Reference the official documentation for these libraries as appropriate. LLMs are more naturally adept at greenfield development because they are trained on much more boilerplate code than library usage; however, we will prioritize the use of available libraries because a) humans still need to be able to audit and maintain LLM-generated code, and humans need that abstraction, b) leveraging OTS libraries gets us bug fixes and security and feature updates without developing them internally, and c) we are fully confident that as LLM development tools mature, this problem will be prioritized and resolved for the prior two reasons. We want to stay ahead of the curve. When doing work involving these libraries, e.g. implementing or debugging a feature that involves calling functions from one of them, try to look up the official LLM instruction text (llms.txt) for that library. Whenever an implementing or updating this application with both this applications specifications and the official library documentation in context, consider whether the specification could be written more clearly and efficiently by referencing the library's terminology; for example, a spec file may explicitly describe a loop in which one node in an LLM state machine generates output that a subsequent node evaluates and either returns to the first node for enhancement or moves on to a downstream node; if implemented in LangGraph, this spec could be clarified by referencing the Evaluator-optimizer workflow mentioned at https://docs.langchain.com/oss/python/langgraph/workflows-agents.
+
 ## Implementation Details
 Precise implementation details — such as specific Python packages, database engines, file paths, or storage formats — must appear in **exactly one place** in the documentation, under an `## Implementation` or `### Implementation` header in the most relevant spec file. All other documentation must refer to the concept abstractly (e.g., "the vector store", "the key-value store", "the Z-Bundle root") and link to the authoritative spec rather than restating the detail. This prevents drift and makes technology changes require edits in only one place.
 
@@ -39,16 +42,11 @@ Do this as part of the same fix, not as a follow-up — the spec update is part 
 ## LLM Prompts
 LLM prompts appear in two places and MUST be kept in sync:
 1. **Spec files** (in docs/): The authoritative documentation of what each prompt should contain. Changes to prompt content, structure, or intent should be made here first.
-2. **Code files** (in lib/): The implementation that delivers prompts to the LLM. These must match the spec files.
+2. **Code files** (in src/): The implementation that delivers prompts to the LLM. These must match the spec files.
 
 When modifying LLM prompts:
 - Update BOTH the spec file and the code file in the same change.
 - The spec file serves as the source of truth for prompt design decisions.
 - Code implementations (e.g., `getScriptPrompt()` in IfEngineConnector, system prompts in ExperienceGenerationProcess) must reflect the spec.
-
-Key prompt locations:
-- **Experience Generation prompts** (Author, Scripter, Technical Editor, Story Editor): Spec in `docs/Experience Generation.md`, code in `src/zforge/graphs/experience_generation_graph.py`
-- **IF Engine script prompts** (ink syntax guidance): Spec in `docs/Ink Engine Connector.md`, code in `src/zforge/services/if_engine/ink_engine_connector.py`
-
 
 Note again that prompts for the outsource team are an exception and should not be written to files.

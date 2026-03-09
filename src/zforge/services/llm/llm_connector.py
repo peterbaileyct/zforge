@@ -23,6 +23,10 @@ class LlmConnector(ABC):
         """Names of required configuration values (e.g., ['api_key'])."""
 
     @abstractmethod
+    def get_available_models(self) -> list[str]:
+        """Return the list of models this connector can serve."""
+
+    @abstractmethod
     def load_from_keyring(self) -> None:
         """Load credentials from keyring into connector state."""
 
@@ -31,8 +35,15 @@ class LlmConnector(ABC):
         """Return True if credentials are present and valid."""
 
     @abstractmethod
-    def get_model(self) -> BaseChatModel:
-        """Return a configured LangChain chat model instance."""
+    def get_model(self, model_name: str | None = None) -> BaseChatModel:
+        """Return a configured LangChain chat model instance.
+
+        Parameters
+        ----------
+        model_name:
+            Specific model to use.  When *None*, the connector's default
+            model is returned.
+        """
 
     @abstractmethod
     def get_context_size(self) -> int:

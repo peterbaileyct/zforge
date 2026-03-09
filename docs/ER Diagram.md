@@ -9,6 +9,9 @@ erDiagram
         string slug
         string uuid
         string summary
+        string setting_era "optional"
+        stringList source_canon "optional"
+        stringList content_advisories "optional"
     }
     Character {
         string id
@@ -26,6 +29,41 @@ erDiagram
     Event {
         string description
         string time
+    }
+    Faction {
+        string id
+        string name
+        string description
+    }
+    Artifact {
+        string id
+        string name
+        string description
+    }
+    Era {
+        string id
+        string name
+        string description
+    }
+    Culture {
+        string id
+        string name
+        string description
+    }
+    Deity {
+        string id
+        string name
+        string description
+    }
+    Prophecy {
+        string id
+        string name
+        string text
+    }
+    Concept {
+        string id
+        string name
+        string description
     }
     Mechanic {
         string text
@@ -49,6 +87,7 @@ erDiagram
         string slug
         string uuid
         string summary
+        string setting_era "optional"
         string embedding_model_name
         int embedding_model_size_bytes
     }
@@ -78,11 +117,25 @@ erDiagram
         int sizeBytesApprox
         bool isDefault
     }
+    LlmNodeConfig {
+        string processSlug
+        string nodeSlug
+        string provider
+        string model
+    }
 
     ZForgeConfig ||--|| PlayerPreferences       : "contains"
+    ZForgeConfig ||--o{ LlmNodeConfig           : "maps per-node settings"
     ZWorld       ||--o{ Character               : "has"
     ZWorld       ||--o{ Location                : "has"
     ZWorld       ||--o{ Event                   : "has"
+    ZWorld       ||--o{ Faction                 : "has"
+    ZWorld       ||--o{ Artifact                : "has"
+    ZWorld       ||--o{ Era                     : "has"
+    ZWorld       ||--o{ Culture                 : "has"
+    ZWorld       ||--o{ Deity                   : "has"
+    ZWorld       ||--o{ Prophecy                : "has"
+    ZWorld       ||--o{ Concept                 : "has"
     ZWorld       ||--o{ Mechanic                : "has"
     ZWorld       ||--o{ Trope                   : "has"
     ZWorld       ||--o{ Species                 : "has"
