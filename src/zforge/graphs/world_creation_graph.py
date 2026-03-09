@@ -17,6 +17,7 @@ docs/World Generation.md.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -30,6 +31,7 @@ from langgraph.graph import END, StateGraph
 
 from zforge.graphs.graph_utils import log_node
 from zforge.graphs.state import CreateWorldState
+from zforge.graphs.document_parsing_graph import _LLAMA_EXECUTOR
 
 log = logging.getLogger(__name__)
 
@@ -102,7 +104,7 @@ def _make_document_parsing_node(
     )
 
     @log_node("document_parsing")
-    def document_parsing_node(state: CreateWorldState) -> dict:
+    async def document_parsing_node(state: CreateWorldState) -> dict:
         # Derive a temporary slug from first ~50 chars of input
         title_hint = state["input_text"][:50].strip().split("\n")[0]
         temp_slug = re.sub(r"[^a-z0-9]+", "-", title_hint.lower()).strip("-") or "world"
@@ -120,8 +122,8 @@ def _make_document_parsing_node(
             "status_message": "Starting document parsing...",
         }
 
-        # Run the parsing sub-graph synchronously
-        result = parsing_graph.invoke(parsing_state)
+        # Run the parsing sub-graph asynchronously
+        result = await parsing_graph.ainvoke(parsing_state)
 
         log.info(
             "document_parsing_node: sub-graph completed — status=%r",
@@ -145,7 +147,7 @@ def _make_summarizer_node(
     _model_cache: list = []
 
     @log_node("summarizer")
-    def summarizer_node(state: CreateWorldState) -> dict:
+    async def summarizer_node(state: CreateWorldState) -> dict:
         if not _model_cache:
             _model_cache.append(llm_connector.get_model(model_name))
         model = _model_cache[0]
@@ -154,27 +156,30 @@ def _make_summarizer_node(
 
         # Build retriever tools for this Z-Bundle
         @tool
-        def retrieve_vector(query: str) -> str:
+        async def retrieve_vector(query: str) -> str:
             """Search the Z-Bundle's vector store for semantically similar chunks.
 
             Args:
                 query: Natural language search query.
             """
             import lancedb
-            from langchain_community.vectorstores import LanceDB as LanceDBVectorStore
 
             vector_path = f"{z_bundle_root}/vector"
-            embeddings = embedding_connector.get_embeddings()
-            db = lancedb.connect(vector_path)
-            store = LanceDBVectorStore(
-                connection=db,
-                embedding=embeddings,
-                table_name="chunks",
+            loop = asyncio.get_running_loop()
+            embedder = embedding_connector.get_embeddings()
+            query_vec = await loop.run_in_executor(
+                _LLAMA_EXECUTOR,
+                lambda: embedder.embed_query(query),
             )
-            docs = store.similarity_search(query, k=5)
-            if not docs:
+            db = await lancedb.connect_async(vector_path)
+            table = await db.open_table("chunks")
+            results_arrow = await (
+                await table.search(query_vec, query_type="vector")
+            ).limit(5).to_arrow()
+            texts = results_arrow.column("text").to_pylist()
+            if not texts:
                 return "No results found."
-            return "\n\n---\n\n".join(d.page_content for d in docs)
+            return "\n\n---\n\n".join(t for t in texts if t)
 
         @tool
         def retrieve_graph(query: str) -> str:
@@ -188,7 +193,7 @@ def _make_summarizer_node(
 
             graph_path = f"{z_bundle_root}/propertygraph"
             db = kuzu.Database(graph_path)
-            graph = KuzuGraph(db)
+            graph = KuzuGraph(db, allow_dangerous_requests=True)
             schema = graph.get_schema
             return f"Graph schema:\n{schema}\n\nUse retrieve_vector for detailed content."
 
@@ -206,7 +211,7 @@ def _make_summarizer_node(
             ]
 
         bound_model = model.bind_tools(tools)
-        response = bound_model.invoke(messages)
+        response = await bound_model.ainvoke(messages)
         messages.append(response)
 
         # Process tool calls inline (per Processes.md — no ToolNode)
@@ -217,7 +222,7 @@ def _make_summarizer_node(
             for tc in response.tool_calls:
                 tool_fn = tool_map.get(tc["name"])
                 if tool_fn:
-                    result = tool_fn.invoke(tc["args"])
+                    result = await tool_fn.ainvoke(tc["args"])
                     log.info(
                         "summarizer_node: tool %s returned %d chars",
                         tc["name"],

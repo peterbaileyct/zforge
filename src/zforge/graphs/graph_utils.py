@@ -8,6 +8,7 @@ requiring manual instrumentation in each node body.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import logging
 import time
@@ -50,6 +51,40 @@ def log_node(name: str) -> Callable:
     """
 
     def decorator(fn: Callable) -> Callable:
+        if asyncio.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def async_wrapper(state: Any) -> Any:
+                status = state.get("status") if isinstance(state, dict) else "?"
+                log.info("[node:%s] START  status=%r", name, status)
+                t0 = time.perf_counter()
+                try:
+                    result = await fn(state)
+                    elapsed = time.perf_counter() - t0
+                    keys = (
+                        list(result.keys())
+                        if isinstance(result, dict)
+                        else type(result).__name__
+                    )
+                    log.info(
+                        "[node:%s] END    status=%r  returned=%r  elapsed=%.2fs",
+                        name,
+                        status,
+                        keys,
+                        elapsed,
+                    )
+                    return result
+                except Exception:
+                    elapsed = time.perf_counter() - t0
+                    log.exception(
+                        "[node:%s] EXCEPTION  status=%r  elapsed=%.2fs",
+                        name,
+                        status,
+                        elapsed,
+                    )
+                    raise
+
+            return async_wrapper
+
         @functools.wraps(fn)
         def wrapper(state: Any) -> Any:
             status = state.get("status") if isinstance(state, dict) else "?"

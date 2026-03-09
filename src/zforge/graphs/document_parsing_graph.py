@@ -17,6 +17,7 @@ docs/Parsing Documents to Z-Bundles.md.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 from typing import TYPE_CHECKING
 
@@ -44,6 +45,15 @@ _CONTEXTUALIZER_PROMPT_TEMPLATE = (
 
 # Default concurrency limit for the fan-out semaphore.
 _FAN_OUT_CONCURRENCY = 5
+
+# Single-thread executor for all llama.cpp / local-model work.
+# llama.cpp's Metal (GPU) backend on macOS binds its command queue to the OS
+# thread on which the model is first loaded. Using asyncio.to_thread() risks
+# dispatching to a different thread on each call, causing a silent hang.
+# Using a max_workers=1 executor guarantees every call lands on the same thread.
+_LLAMA_EXECUTOR: concurrent.futures.ThreadPoolExecutor = (
+    concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="llama")
+)
 
 
 # ------------------------------------------------------------------
@@ -85,7 +95,7 @@ def _make_contextualizer_node(
     _model_cache: list = []
 
     @log_node("contextualizer")
-    def contextualizer_node(state: DocumentParsingState) -> dict:
+    async def contextualizer_node(state: DocumentParsingState) -> dict:
         if not _model_cache:
             _model_cache.append(llm_connector.get_model(model_name))
         model = _model_cache[0]
@@ -117,7 +127,7 @@ def _make_contextualizer_node(
             len(chunks),
             len(chunk),
         )
-        response = model.invoke(
+        response = await model.ainvoke(
             [SystemMessage(content=system), HumanMessage(content=human_content)]
         )
         summary = str(getattr(response, "content", ""))
@@ -143,9 +153,10 @@ def _make_vector_ingestion_node(embedding_connector):
     """Return a node that writes Documents to LanceDB."""
 
     @log_node("vector_ingestion")
-    def vector_ingestion_node(state: DocumentParsingState) -> dict:
+    async def vector_ingestion_node(state: DocumentParsingState) -> dict:
+        import uuid as _uuid
+
         import lancedb
-        from langchain_community.vectorstores import LanceDB as LanceDBVectorStore
 
         documents = state["documents"]
         z_bundle_root = state["z_bundle_root"]
@@ -157,14 +168,35 @@ def _make_vector_ingestion_node(embedding_connector):
             vector_path,
         )
 
-        embeddings = embedding_connector.get_embeddings()
-        db = lancedb.connect(vector_path)
-        LanceDBVectorStore.from_documents(
-            documents,
-            embeddings,
-            connection=db,
-            table_name="chunks",
+        texts = [doc.page_content for doc in documents]
+        metadatas = [doc.metadata for doc in documents]
+
+        # Compute embeddings on the dedicated llama thread so the event loop
+        # stays free and Metal always runs on the same OS thread.
+        loop = asyncio.get_running_loop()
+        embedder = embedding_connector.get_embeddings()
+        vectors = await loop.run_in_executor(
+            _LLAMA_EXECUTOR,
+            lambda: embedder.embed_documents(texts),
         )
+
+        # Build rows in the schema LanceDBVectorStore expects.
+        rows = [
+            {
+                "id": str(_uuid.uuid4()),
+                "text": text,
+                "vector": vec,
+                "metadata": metadatas[i] if metadatas else {},
+            }
+            for i, (text, vec) in enumerate(zip(texts, vectors))
+        ]
+
+        # Connect and write using the native async API so we stay on the
+        # running event loop — lancedb.connect() (sync) internally bridges
+        # futures across loops and deadlocks when called from any asyncio
+        # context. See docs/Parsing Documents to Z-Bundles.md.
+        db = await lancedb.connect_async(vector_path)
+        await db.create_table("chunks", data=rows, mode="overwrite")
 
         log.info("vector_ingestion_node: done")
         return {
@@ -182,7 +214,7 @@ def _make_graph_ingestion_node(
     _model_cache: list = []
 
     @log_node("graph_ingestion")
-    def graph_ingestion_node(state: DocumentParsingState) -> dict:
+    async def graph_ingestion_node(state: DocumentParsingState) -> dict:
         import kuzu
         from langchain_community.graphs import KuzuGraph
         from langchain_experimental.graph_transformers import LLMGraphTransformer
@@ -207,16 +239,85 @@ def _make_graph_ingestion_node(
             allowed_nodes=allowed_nodes,
             allowed_relationships=allowed_relationships,
         )
-        graph_documents = transformer.convert_to_graph_documents(documents)
+        graph_documents = await transformer.aconvert_to_graph_documents(documents)
 
         log.info(
             "graph_ingestion_node: extracted %d graph documents",
             len(graph_documents),
         )
 
+        # KuzuGraph has two schema-staleness bugs when processing multiple documents:
+        # 1. _create_entity_relationship_table uses CREATE REL TABLE (single FROM-TO).
+        #    IF NOT EXISTS silently skips subsequent pairs → MERGE schema violation.
+        # 2. The MENTIONS REL TABLE GROUP is seeded only from the first document's
+        #    node labels. IF NOT EXISTS skips re-creation for later documents that
+        #    introduce new node types → same MERGE schema violation.
+        # Fix: subclass KuzuGraph to (a) pre-create all node/MENTIONS schema from
+        # the full allowed_nodes list before add_graph_documents runs, and (b) use
+        # REL TABLE GROUP + ALTER TABLE for entity-entity relationships so new
+        # FROM-TO pairs can always be appended. See docs/Parsing Documents to
+        # Z-Bundles.md § KùzuDB schema staleness pitfalls.
+        class _MultiTypeKuzuGraph(KuzuGraph):
+            def _pre_create_schema(self, allowed_node_labels: list[str]) -> None:
+                """Pre-create all node tables and the MENTIONS group up front."""
+                # Entity node tables
+                for label in allowed_node_labels:
+                    self.conn.execute(
+                        f"CREATE NODE TABLE IF NOT EXISTS {label} "
+                        f"(id STRING, type STRING, PRIMARY KEY (id))"
+                    )
+                # Chunk node table (mirrors _create_chunk_node_table)
+                self.conn.execute(
+                    "CREATE NODE TABLE IF NOT EXISTS Chunk "
+                    "(id STRING, text STRING, type STRING, PRIMARY KEY (id))"
+                )
+                # MENTIONS REL TABLE GROUP covering every allowed node type.
+                # Build and execute the full DDL the first time; for subsequent
+                # calls (already exists) add any missing FROM-TO pairs.
+                from_to_pairs = ", ".join(
+                    f"FROM Chunk TO {lbl}" for lbl in allowed_node_labels
+                )
+                try:
+                    self.conn.execute(
+                        f"CREATE REL TABLE GROUP MENTIONS "
+                        f"({from_to_pairs}, label STRING, triplet_source_id STRING)"
+                    )
+                except Exception:
+                    for label in allowed_node_labels:
+                        try:
+                            self.conn.execute(
+                                f"ALTER TABLE MENTIONS ADD FROM Chunk TO {label}"
+                            )
+                        except Exception:
+                            pass  # Pair already registered.
+
+            def _create_entity_relationship_table(self, rel) -> None:  # type: ignore[override]
+                src, rel_type, tgt = rel.source.type, rel.type, rel.target.type
+                try:
+                    self.conn.execute(
+                        f"CREATE REL TABLE GROUP {rel_type} (FROM {src} TO {tgt})"
+                    )
+                except Exception:
+                    try:
+                        self.conn.execute(
+                            f"ALTER TABLE {rel_type} ADD FROM {src} TO {tgt}"
+                        )
+                    except Exception:
+                        pass  # Pair already registered.
+
         db = kuzu.Database(graph_path)
-        graph = KuzuGraph(db)
-        graph.add_graph_documents(graph_documents, include_source=True)
+        graph = _MultiTypeKuzuGraph(db, allow_dangerous_requests=True)
+        graph._pre_create_schema(allowed_nodes)
+        # allowed_relationships for add_graph_documents must be List[Tuple[src, rel, tgt]].
+        # KuzuGraph derives the actual schema dynamically per relationship, so
+        # this parameter is required by the signature but not used in the body.
+        rel_triplets = [
+            (src, rel, tgt)
+            for src in allowed_nodes
+            for rel in allowed_relationships
+            for tgt in allowed_nodes
+        ]
+        graph.add_graph_documents(graph_documents, rel_triplets, include_source=True)
 
         log.info("graph_ingestion_node: done")
         return {
@@ -230,30 +331,17 @@ def _make_fan_out_node(vector_node, graph_node):
     """Return a node that runs vector and graph ingestion concurrently."""
 
     @log_node("fan_out")
-    def fan_out_node(state: DocumentParsingState) -> dict:
+    async def fan_out_node(state: DocumentParsingState) -> dict:
         sem = asyncio.Semaphore(_FAN_OUT_CONCURRENCY)
 
-        async def _run_with_sem(fn):
+        async def _run_with_sem(coro_fn):
             async with sem:
-                return await asyncio.get_event_loop().run_in_executor(None, fn, state)
+                return await coro_fn(state)
 
-        async def _gather():
-            return await asyncio.gather(
-                _run_with_sem(vector_node),
-                _run_with_sem(graph_node),
-            )
-
-        # Use existing loop if available, otherwise create one
-        try:
-            loop = asyncio.get_running_loop()
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                f1 = pool.submit(vector_node, state)
-                f2 = pool.submit(graph_node, state)
-                f1.result()
-                f2.result()
-        except RuntimeError:
-            asyncio.run(_gather())
+        await asyncio.gather(
+            _run_with_sem(vector_node),
+            _run_with_sem(graph_node),
+        )
 
         return {
             "status": "complete",

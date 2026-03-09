@@ -131,3 +131,5 @@ Most parsing implementation details are covered in the [Document Parsing](Parsin
       failure_reason: str | None
       messages: Annotated[list, add_messages]
   ```
+
+- **Async nodes required:** `document_parsing_node` and `summarizer_node` must be `async def` and use `await parsing_graph.ainvoke(...)` / `await bound_model.ainvoke(...)`. See the [Document Parsing async pitfall note](Parsing%20Documents%20to%20Z-Bundles.md#async-nodes-required--afc-deadlock-pitfall) for the full explanation — the same AFC deadlock applies here.
