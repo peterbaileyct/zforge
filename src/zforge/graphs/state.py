@@ -2,6 +2,8 @@
 
 ExperienceGenerationState per docs/Experience Generation.md.
 CreateWorldState per docs/World Generation.md.
+DocumentParsingState per docs/Parsing Documents to Z-Bundles.md.
+
 Uses Annotated[int, operator.add] for iteration counters and
 Annotated[list, add_messages] for LangGraph message history.
 
@@ -53,28 +55,33 @@ class ExperienceGenerationState(TypedDict):
     messages: Annotated[list, add_messages]
 
 
-class CreateWorldState(TypedDict):
-    """State for the world creation LangGraph graph."""
+class DocumentParsingState(TypedDict):
+    """State for the document parsing LangGraph sub-graph.
 
-    # Inputs
+    Per docs/Parsing Documents to Z-Bundles.md § Implementation.
+    """
+
     input_text: str
-
-    # State
-    input_valid: bool | None
-
-    # Chunking — input is pre-split by the chunker node; partial extractions
-    # accumulate across chunks and are merged in the finalizer node.
-    input_chunks: list[str]
+    z_bundle_root: str
+    allowed_nodes: list[str]
+    allowed_relationships: list[str]
+    chunks: list[str]
+    documents: list
     current_chunk_index: Annotated[int, operator.add]
-    partial_zworlds: Annotated[list, operator.add]
+    status: str
+    status_message: str
 
-    # Counters
-    validation_iterations: Annotated[int, operator.add]
 
-    # Status
+class CreateWorldState(TypedDict):
+    """State for the world creation LangGraph graph.
+
+    Per docs/World Generation.md § Implementation.
+    """
+
+    input_text: str
+    z_bundle_root: str | None
+    zworld_kvp: dict | None
     status: str
     status_message: str
     failure_reason: str | None
-
-    # LangGraph message history
     messages: Annotated[list, add_messages]

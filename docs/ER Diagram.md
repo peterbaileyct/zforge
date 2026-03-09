@@ -13,81 +13,14 @@ erDiagram
         stringList source_canon "optional"
         stringList content_advisories "optional"
     }
-    Character {
-        string id
-        string history
-    }
-    CharacterName {
-        string name
-        string context "optional"
-    }
-    Location {
-        string id
-        string name
-        string description
-    }
-    Event {
-        string description
-        string time
-    }
-    Faction {
-        string id
-        string name
-        string description
-    }
-    Artifact {
-        string id
-        string name
-        string description
-    }
-    Era {
-        string id
-        string name
-        string description
-    }
-    Culture {
-        string id
-        string name
-        string description
-    }
-    Deity {
-        string id
-        string name
-        string description
-    }
-    Prophecy {
-        string id
-        string name
-        string text
-    }
-    Concept {
-        string id
-        string name
-        string description
-    }
-    Mechanic {
-        string text
-    }
-    Trope {
-        string text
-    }
-    Species {
-        string text
-    }
-    Occupation {
-        string text
-    }
-    Relationship {
-        string from_id
-        string to_id
-        string type
-    }
     ZBundleKVP {
         string title
         string slug
         string uuid
         string summary
         string setting_era "optional"
+        stringList source_canon "optional"
+        stringList content_advisories "optional"
         string embedding_model_name
         int embedding_model_size_bytes
     }
@@ -100,6 +33,8 @@ erDiagram
         string embeddingModelPath "relative to sandboxed storage"
         int embeddingContextSize "default 512"
         int embeddingGpuLayers "default 0"
+        int parsingChunkSize "default 10000"
+        int parsingChunkOverlap "default 500"
     }
     PlayerPreferences {
         int    characterToPlot      "1-10; 1=character, 10=plot; default 5"
@@ -126,32 +61,18 @@ erDiagram
 
     ZForgeConfig ||--|| PlayerPreferences       : "contains"
     ZForgeConfig ||--o{ LlmNodeConfig           : "maps per-node settings"
-    ZWorld       ||--o{ Character               : "has"
-    ZWorld       ||--o{ Location                : "has"
-    ZWorld       ||--o{ Event                   : "has"
-    ZWorld       ||--o{ Faction                 : "has"
-    ZWorld       ||--o{ Artifact                : "has"
-    ZWorld       ||--o{ Era                     : "has"
-    ZWorld       ||--o{ Culture                 : "has"
-    ZWorld       ||--o{ Deity                   : "has"
-    ZWorld       ||--o{ Prophecy                : "has"
-    ZWorld       ||--o{ Concept                 : "has"
-    ZWorld       ||--o{ Mechanic                : "has"
-    ZWorld       ||--o{ Trope                   : "has"
-    ZWorld       ||--o{ Species                 : "has"
-    ZWorld       ||--o{ Occupation              : "has"
-    ZWorld       ||--o{ Relationship            : "has"
-    Location     ||--o{ Location                : "sublocations"
-    Character    ||--o{ CharacterName           : "has"
     ZWorld       ||--|| ZBundleKVP              : "persisted as"
 ```
 
 ## Z-Bundle Storage
 
 Z-Worlds are persisted as Z-Bundles at `bundles/world/{slug}/`:
-- `kvp.json` — key-value metadata (title, slug, UUID, summary, embedding model identity)
-- `vector/` — LanceDB vector store (entity embeddings with entity_id, entity_type, text columns)
-- `propertygraph/` — KùzuDB property graph (Entity nodes + Relationship edges)
+- `kvp.json` — key-value metadata (title, slug, UUID, summary, setting_era, source_canon, content_advisories, embedding model identity)
+- `source.txt` — original raw input text
+- `vector/` — LanceDB vector store (document chunk embeddings; table name `chunks`)
+- `propertygraph/` — KùzuDB property graph (schema-less entity nodes and relationship edges, managed by `KuzuGraph.add_graph_documents`)
+
+Entity types (Character, Location, Event, Faction, Artifact, Era, Culture, Deity, Prophecy, Concept, Mechanic, Trope, Species, Occupation) are no longer Python dataclasses — they exist as schema-less nodes in KuzuDB, created dynamically by `LLMGraphTransformer`.
 
 ```mermaid
 erDiagram
@@ -162,36 +83,23 @@ erDiagram
     KVPStore {
         string path "kvp.json"
     }
+    SourceText {
+        string path "source.txt"
+    }
     VectorStore {
         string path "vector/"
         string backend "LanceDB"
+        string table_name "chunks"
     }
     PropertyGraph {
         string path "propertygraph/"
         string backend "KuzuDB"
     }
-    VectorRow {
-        floatArray vector
-        string entity_id
-        string entity_type
-        string text
-    }
-    GraphEntity {
-        string entity_id
-        string entity_type
-    }
-    GraphRelationship {
-        string type
-    }
 
     ZBundle      ||--|| KVPStore         : "contains"
+    ZBundle      ||--|| SourceText       : "contains"
     ZBundle      ||--|| VectorStore      : "contains"
     ZBundle      ||--|| PropertyGraph    : "contains"
-    VectorStore  ||--o{ VectorRow        : "rows"
-    PropertyGraph ||--o{ GraphEntity     : "nodes"
-    PropertyGraph ||--o{ GraphRelationship : "edges"
-    GraphRelationship }o--|| GraphEntity : "from"
-    GraphRelationship }o--|| GraphEntity : "to"
 ```
 
 ## Runtime / Service Models
@@ -236,12 +144,23 @@ erDiagram
         int storyEditIterations
     }
     CreateWorldProcess {
-        CreateWorldStatus status
+        string status "parsing, summarizing, finalizing, complete, failed"
         string statusMessage "current step description for UI"
         string failureReason "optional"
         string inputText
-        bool inputValid "optional"
-        int validationIterations
+        string zBundleRoot "optional"
+        dict zworldKvp "optional"
+    }
+    DocumentParsingProcess {
+        string status "contextualizing, complete"
+        string statusMessage "current step description for UI"
+        string inputText
+        string zBundleRoot
+        listStr allowedNodes
+        listStr allowedRelationships
+        listStr chunks
+        list documents
+        int currentChunkIndex
     }
 
     ExperienceGenerationProcess ||--|| ZWorld : "input"
@@ -255,7 +174,8 @@ erDiagram
 - `ModelCatalogueEntry` entries are defined in `src/zforge/models/model_catalogue.py` (static catalogue, not persisted).
 - `ModelDownloadService` (`src/zforge/services/model_download_service.py`) streams GGUF files from Hugging Face CDN.
 - `ExperienceGenerationState` (`src/zforge/graphs/state.py`) is the LangGraph TypedDict that drives the multi-agent LLM workflow for experience creation.
-- `CreateWorldState` (`src/zforge/graphs/state.py`) is the LangGraph TypedDict that drives the LLM workflow for world creation.
+- `CreateWorldState` (`src/zforge/graphs/state.py`) is the LangGraph TypedDict that drives the world creation pipeline.
+- `DocumentParsingState` (`src/zforge/graphs/state.py`) is the LangGraph TypedDict for the document parsing sub-graph.
 - IF engine abstraction: `IfEngineConnector` (`src/zforge/services/if_engine/if_engine_connector.py`) with ink implementation (`src/zforge/services/if_engine/ink_engine_connector.py`).
 - Embedding abstraction: `EmbeddingConnector` (`src/zforge/services/embedding/embedding_connector.py`) with llama.cpp implementation (`src/zforge/services/embedding/llama_cpp_embedding_connector.py`).
-- LLM abstraction: `LlmConnector` (`src/zforge/services/llm/llm_connector.py`) with local llama.cpp implementation (`src/zforge/services/llm/llama_cpp_connector.py`). No cloud LLM providers are used.
+- LLM abstraction: `LlmConnector` (`src/zforge/services/llm/llm_connector.py`) with local llama.cpp implementation (`src/zforge/services/llm/llama_cpp_connector.py`).

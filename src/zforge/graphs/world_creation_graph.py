@@ -1,596 +1,343 @@
 """LangGraph world creation graph.
 
-Factory function builds a StateGraph(CreateWorldState) with a chunker node,
-editor and designer agent nodes, and a deterministic finalizer node.
+Three-node pipeline per docs/World Generation.md:
 
-Tool calls are executed inline within the agent nodes — no ToolNode is used.
-This ensures that tool return values (plain dicts) are merged directly into
-graph state rather than being stored only as ToolMessage content, which is
-how LangGraph 1.x ToolNode behaves with non-Command returns.
+1. document_parsing_node — invokes the document_parsing_graph as a sub-graph
+   to populate the Z-Bundle's vector store and property graph.
+2. summarizer_node — agentic RAG that queries the populated Z-Bundle via
+   retriever tools to produce KVP metadata JSON.
+3. finalizer_node — deterministic construction of ZWorld + ZWorldManager.create().
 
-Large input documents are split into context-fitting chunks by the chunker
-node.  The designer processes one chunk per pass, accumulating partial ZWorld
-extractions in state.  After all chunks are processed the finalizer merges the
-partial extractions and writes the Z-Bundle.
+Tool calls are executed inline within the summarizer node — no ToolNode is used
+(per docs/Processes.md § LangGraph tool call pattern).
 
 Implements: src/zforge/graphs/world_creation_graph.py per
-docs/World Generation.md and docs/LLM Orchestration.md.
+docs/World Generation.md.
 """
 
 from __future__ import annotations
 
-import concurrent.futures
+import json
 import logging
+import os
+import re
 import uuid as uuid_mod
 from typing import TYPE_CHECKING
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import tool
 from langgraph.graph import END, StateGraph
 
-from zforge.graphs.graph_utils import chunk_text, log_node
+from zforge.graphs.graph_utils import log_node
 from zforge.graphs.state import CreateWorldState
 
 log = logging.getLogger(__name__)
 
-from zforge.tools.world_tools import (
-    get_zworld_manager,
-    MAX_VALIDATION_ATTEMPTS,
-)
-
 if TYPE_CHECKING:
+    from zforge.managers.zworld_manager import ZWorldManager
+    from zforge.services.embedding.embedding_connector import EmbeddingConnector
     from zforge.services.llm.llm_connector import LlmConnector
 
+# --- World Generation entity schema (from docs/World Generation.md Step 1) ---
 
-# --- System Prompts ---
+ALLOWED_NODES = [
+    "Character", "Location", "Event", "Faction", "Artifact", "Era",
+    "Culture", "Deity", "Prophecy", "Concept", "Mechanic", "Trope",
+    "Species", "Occupation",
+]
 
-_EDITOR_SYSTEM_PROMPT = (
-    "You are a literature editor. You are to determine whether the "
-    "following is a clear description of a fictional world, listing "
-    "characters and their relationships with one another, locations, "
-    "and events."
-)
+ALLOWED_RELATIONSHIPS = [
+    "friends_with", "enemy_of", "parent_of", "mentor_of", "present_at",
+    "born_in", "member_of", "leads", "is_a", "owns", "seeks",
+    "subject_to", "embodies", "west_of", "inside_of", "controls",
+    "native_to", "located_at", "occurred_at", "allied_with",
+    "at_war_with", "caused", "preceded",
+]
 
-_DESIGNER_SYSTEM_PROMPT_TEMPLATE = """\
-You are a designer for an interactive fiction system. ZWorlds, used as the \
-basis of your interactive fiction experiences, consist of the following:
+# --- Summarizer prompt (authoritative, from docs/World Generation.md Step 2) ---
 
-A ZWorld specification includes:
-- name: the display name (e.g., "Discworld")
-- summary: 1-3 paragraphs describing the world in diegetic terms, suitable for \
-helping a player understand the world at a glance
-- characters: list, each with a stable ID, one or more names (with optional \
-context, e.g. "formal name"), and a narrative history
-- locations: list at any granularity with narrative significance (broad regions \
-AND specific buildings/landmarks); each with stable ID, name, description, and \
-optional sublocations
-- events: list of significant occurrences, each with description and a time \
-(literal date or relative, e.g. "three years before the story begins")
-- mechanics: rules or systems that distinguish how the world operates \
-(e.g. "magic exists and is divided between academic wizards and rural witches")
-- tropes: recurring story elements and narrative style conventions \
-(e.g. "found family themes", "long footnotes detailing world lore")
-- species: non-default or notable species; omit if the world maps to Earth species
-- occupations: real-world or world-specific occupations of narrative significance
-- relationships: typed links between entity IDs \
-(e.g., character friends_with character, character present_at event, \
-character is_a species, location inside_of location)
+_SUMMARIZER_SYSTEM_PROMPT = """\
+You are a junior script editor with access to a hybrid data store describing \
+a fictional world. Look up appropriate details to produce the following \
+information about the world in a JSON document:
+- `title`: the full display name of the world (e.g. "Discworld")
+- `summary`: 3–5 sentences describing the world in diegetic terms, suitable \
+for helping a player understand the world at a glance
+- `setting_era`: a brief label for when the world is nominally set (e.g. \
+"pre-industrial fantasy", "far future", "alternate 1920s")
+- `source_canon`: a list of source work titles — books, films, games — the \
+world is drawn from
+- `content_advisories`: a list of thematic flags relevant to experience \
+generation (e.g. "moderate violence", "political intrigue", "body horror")
 
-Create a ZWorld from the following description of a fictional world:
-
-{input_text}"""
-
-_DESIGNER_CHUNK_SUFFIX = """\
-
-[Note: This is part {chunk_num} of {total_chunks} of the full document. \
-Extract all entities you can identify in this section. \
-Use the same stable IDs for any entities already seen in earlier parts.]"""
-
-_REJECTION_SYSTEM_PROMPT = (
-    "The input text was evaluated as inadequate for world creation. "
-    "Please explain clearly why the text is inadequate or inappropriate "
-    "as a fictional world description."
-)
-_LLM_TIMEOUT_SECONDS = 180
-
-_DESIGNER_JSON_SUFFIX = """
-
-Respond with a single JSON object (no markdown fencing, no explanation \
-outside the JSON) with exactly these keys:
-{
-  "name": "...",
-  "summary": "...",
-  "characters": [{"id": "char_...", "names": [{"name": "...", "context": "..."}], "history": "..."}],
-  "locations": [{"id": "loc_...", "name": "...", "description": "...", "sublocations": []}],
-  "events": [{"description": "...", "time": "..."}],
-  "mechanics": ["..."],
-  "tropes": ["..."],
-  "species": ["..."],
-  "occupations": ["..."],
-  "relationships": [{"from_id": "...", "to_id": "...", "type": "..."}]
-}"""
-
-# Fraction of context_size (in chars, estimated at 4 chars/token) reserved for
-# the input portion of each prompt.  The remainder covers system + human prompts.
-_INPUT_FRACTION = 0.55
+Use the retriever tools to look up information before producing your final \
+answer. When you are ready, respond with ONLY a JSON object (no markdown \
+fencing) with exactly these keys: title, summary, setting_era, source_canon, \
+content_advisories."""
 
 
 # --- Node Factories ---
 
 
-def _make_chunker_node(context_size: int):
-    """Return a node that splits input_text into context-fitting chunks."""
-    max_chars = int(context_size * _INPUT_FRACTION * 4)
+def _make_document_parsing_node(
+    contextualizer_connector,
+    graph_extractor_connector,
+    embedding_connector,
+    config,
+    bundles_root: str,
+    contextualizer_model: str | None = None,
+    graph_extractor_model: str | None = None,
+):
+    """Return a node that runs the document parsing sub-graph."""
 
-    @log_node("chunker")
-    def chunker_node(state: CreateWorldState) -> dict:
-        text = state["input_text"]
-        chunks = chunk_text(text, max_chars)
-        log.info(
-            "chunker_node: split %d chars into %d chunk(s) (max_chars=%d)",
-            len(text),
-            len(chunks),
-            max_chars,
-        )
-        return {
-            "input_chunks": chunks,
-            "status_message": "Validating world description...",
+    from zforge.graphs.document_parsing_graph import build_document_parsing_graph
+
+    parsing_graph = build_document_parsing_graph(
+        contextualizer_connector=contextualizer_connector,
+        graph_extractor_connector=graph_extractor_connector,
+        embedding_connector=embedding_connector,
+        config=config,
+        contextualizer_model=contextualizer_model,
+        graph_extractor_model=graph_extractor_model,
+    )
+
+    @log_node("document_parsing")
+    def document_parsing_node(state: CreateWorldState) -> dict:
+        # Derive a temporary slug from first ~50 chars of input
+        title_hint = state["input_text"][:50].strip().split("\n")[0]
+        temp_slug = re.sub(r"[^a-z0-9]+", "-", title_hint.lower()).strip("-") or "world"
+        z_bundle_root = os.path.join(bundles_root, "world", temp_slug)
+
+        parsing_state = {
+            "input_text": state["input_text"],
+            "z_bundle_root": z_bundle_root,
+            "allowed_nodes": ALLOWED_NODES,
+            "allowed_relationships": ALLOWED_RELATIONSHIPS,
+            "chunks": [],
+            "documents": [],
+            "current_chunk_index": 0,
+            "status": "starting",
+            "status_message": "Starting document parsing...",
         }
 
-    return chunker_node
+        # Run the parsing sub-graph synchronously
+        result = parsing_graph.invoke(parsing_state)
+
+        log.info(
+            "document_parsing_node: sub-graph completed — status=%r",
+            result.get("status"),
+        )
+
+        return {
+            "z_bundle_root": z_bundle_root,
+            "status": "summarizing",
+            "status_message": "Document parsing complete; summarizing...",
+        }
+
+    return document_parsing_node
 
 
-def _invoke_llm_with_timeout(model, messages, timeout: int):
-    """Run *model.invoke* with a timeout enforced via ThreadPoolExecutor."""
+def _make_summarizer_node(
+    llm_connector, embedding_connector, model_name: str | None = None
+):
+    """Return an agentic RAG node that queries the Z-Bundle to produce KVP JSON."""
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(model.invoke, messages)
-        try:
-            return future.result(timeout=timeout)
-        except concurrent.futures.TimeoutError as exc:
-            future.cancel()
-            raise TimeoutError(f"LLM call exceeded {timeout} seconds") from exc
-
-
-def _parse_validation_response(content: str) -> bool | None:
-    """Parse an LLM text response to determine if input was validated.
-
-    Scans for strong positive/negative signals.  Returns True (valid),
-    False (invalid), or None (ambiguous).
-    """
-    normalised = content.strip().lower()
-    # Check first line / first word for a clear verdict
-    first_line = normalised.split("\n", 1)[0].strip().rstrip(".,!:")
-    positive = {"yes", "valid", "adequate", "approved", "acceptable", "true"}
-    negative = {"no", "invalid", "inadequate", "rejected", "inappropriate", "false"}
-    if first_line in positive:
-        return True
-    if first_line in negative:
-        return False
-
-    # Broader scan — count signal words
-    pos_count = sum(1 for w in positive if w in normalised)
-    neg_count = sum(1 for w in negative if w in normalised)
-    if pos_count > neg_count:
-        return True
-    if neg_count > pos_count:
-        return False
-    return None
-
-
-def _make_editor_node(llm_connector: LlmConnector, model_name: str | None = None):
-    """Return an editor node that parses plain-text responses instead of tool calls."""
-    # Lazy: get_model() is deferred to first invocation so that graph build
-    # does not trigger a potentially blocking network call on construction.
     _model_cache: list = []
 
-    @log_node("editor")
-    def editor_node(state: CreateWorldState) -> dict:
+    @log_node("summarizer")
+    def summarizer_node(state: CreateWorldState) -> dict:
         if not _model_cache:
             _model_cache.append(llm_connector.get_model(model_name))
         model = _model_cache[0]
-        status = state["status"]
-        validation_count = state.get("validation_iterations", 0)
-        # Validate against the first chunk only — the editor just needs a
-        # representative sample to decide if this looks like a world description.
-        chunks = state.get("input_chunks") or [state["input_text"]]
-        sample = chunks[0]
 
-        if status == "awaiting_rejection_explanation":
-            system = _REJECTION_SYSTEM_PROMPT
-            action = (
-                "Explain why the following text is inadequate as a world "
-                f"description. Provide a brief explanation.\n\n{sample}"
+        z_bundle_root = state["z_bundle_root"]
+
+        # Build retriever tools for this Z-Bundle
+        @tool
+        def retrieve_vector(query: str) -> str:
+            """Search the Z-Bundle's vector store for semantically similar chunks.
+
+            Args:
+                query: Natural language search query.
+            """
+            import lancedb
+            from langchain_community.vectorstores import LanceDB as LanceDBVectorStore
+
+            vector_path = f"{z_bundle_root}/vector"
+            embeddings = embedding_connector.get_embeddings()
+            db = lancedb.connect(vector_path)
+            store = LanceDBVectorStore(
+                connection=db,
+                embedding=embeddings,
+                table_name="chunks",
+            )
+            docs = store.similarity_search(query, k=5)
+            if not docs:
+                return "No results found."
+            return "\n\n---\n\n".join(d.page_content for d in docs)
+
+        @tool
+        def retrieve_graph(query: str) -> str:
+            """Query the Z-Bundle's property graph for structured entity data.
+
+            Args:
+                query: A Cypher-style query or entity name to look up.
+            """
+            import kuzu
+            from langchain_community.graphs import KuzuGraph
+
+            graph_path = f"{z_bundle_root}/propertygraph"
+            db = kuzu.Database(graph_path)
+            graph = KuzuGraph(db)
+            schema = graph.get_schema
+            return f"Graph schema:\n{schema}\n\nUse retrieve_vector for detailed content."
+
+        tools = [retrieve_vector, retrieve_graph]
+        messages = list(state.get("messages") or [])
+
+        # If this is the first invocation, seed with the system/human messages
+        if not messages:
+            messages = [
+                SystemMessage(content=_SUMMARIZER_SYSTEM_PROMPT),
+                HumanMessage(
+                    content="Produce the JSON metadata for this world. "
+                    "Use the retriever tools to look up details first."
+                ),
+            ]
+
+        bound_model = model.bind_tools(tools)
+        response = bound_model.invoke(messages)
+        messages.append(response)
+
+        # Process tool calls inline (per Processes.md — no ToolNode)
+        state_updates: dict = {"messages": messages}
+
+        if hasattr(response, "tool_calls") and response.tool_calls:
+            tool_map = {t.name: t for t in tools}
+            for tc in response.tool_calls:
+                tool_fn = tool_map.get(tc["name"])
+                if tool_fn:
+                    result = tool_fn.invoke(tc["args"])
+                    log.info(
+                        "summarizer_node: tool %s returned %d chars",
+                        tc["name"],
+                        len(str(result)),
+                    )
+                    messages.append(
+                        ToolMessage(
+                            content=str(result),
+                            tool_call_id=tc["id"],
+                            name=tc["name"],
+                        )
+                    )
+            state_updates["messages"] = messages
+            state_updates["status"] = "summarizing"
+            state_updates["status_message"] = (
+                f"Summarizer called {len(response.tool_calls)} tool(s); continuing..."
             )
         else:
-            system = (
-                _EDITOR_SYSTEM_PROMPT
-                + "\n\nRespond with VALID if this is a clear description of a "
-                "fictional world, or INVALID if it is not. Put your verdict "
-                "on the first line, then optionally explain."
-            )
-            action = (
-                "Evaluate the following world description:\n\n"
-                f"{sample}"
-            )
-
-        log.info(
-            "editor_node: calling LLM (prompt-based), sample length=%d chars",
-            len(sample),
-        )
-        try:
-            response = _invoke_llm_with_timeout(
-                model,
-                [SystemMessage(content=system), HumanMessage(content=action)],
-                _LLM_TIMEOUT_SECONDS,
-            )
-            log.info("editor_node: LLM call returned")
-        except TimeoutError as exc:
-            log.warning("editor_node: LLM call timed out — %s", exc)
-            return {
-                "status": "failed",
-                "failure_reason": "LLM call timed out",
-                "status_message": "World creation paused: LLM timeout",
-            }
-
-        content = str(getattr(response, "content", ""))
-        log.info(
-            "editor_node: response preview: %r",
-            content[:300],
-        )
-
-        state_updates: dict = {}
-
-        if status == "awaiting_rejection_explanation":
-            explanation = content.strip() or "Input was not recognized as a valid world description"
-            log.info("editor_node: rejection explanation length=%d", len(explanation))
-            state_updates["status"] = "failed"
-            state_updates["failure_reason"] = explanation
-            state_updates["status_message"] = "World creation failed: input rejected"
-        else:
-            verdict = _parse_validation_response(content)
-            log.info("editor_node: parsed verdict=%r", verdict)
-
-            if verdict is True:
-                state_updates["input_valid"] = True
-                state_updates["validation_iterations"] = 1
-                state_updates["status"] = "awaiting_generation"
-                state_updates["status_message"] = "Input validated"
-            elif verdict is False:
-                state_updates["input_valid"] = False
-                state_updates["validation_iterations"] = 1
-                state_updates["status"] = "awaiting_validation"
-                state_updates["status_message"] = "Input validation failed"
+            # No tool calls — LLM has produced its final answer
+            content = str(getattr(response, "content", ""))
+            kvp = _parse_summarizer_json(content)
+            if kvp:
+                state_updates["zworld_kvp"] = kvp
+                state_updates["status"] = "finalizing"
+                state_updates["status_message"] = (
+                    f"Summarizer produced metadata for '{kvp.get('title', '?')}'"
+                )
             else:
                 log.warning(
-                    "editor_node: ambiguous LLM response — counting as a "
-                    "failed validation (validation_count=%d)",
-                    validation_count,
+                    "summarizer_node: could not parse JSON from response — "
+                    "marking failed. Preview: %r",
+                    content[:300],
                 )
-                state_updates["validation_iterations"] = 1
-
-            effective_status = state_updates.get("status", status)
-            new_val_count = validation_count + state_updates.get("validation_iterations", 0)
-            if (
-                effective_status == "awaiting_validation"
-                and new_val_count >= MAX_VALIDATION_ATTEMPTS
-            ):
-                log.warning(
-                    "editor_node: max validation attempts (%d) reached —"
-                    " switching to explanation mode",
-                    MAX_VALIDATION_ATTEMPTS,
+                state_updates["status"] = "failed"
+                state_updates["failure_reason"] = (
+                    "Summarizer did not produce valid JSON"
                 )
-                state_updates["status"] = "awaiting_rejection_explanation"
+                state_updates["status_message"] = (
+                    "World creation failed: summarizer output was not valid JSON"
+                )
 
-        return {"messages": [response], **state_updates}
+        return state_updates
 
-    return editor_node
-
-
-_DESIGNER_MAX_WORKERS = 16  # Cap parallel LLM threads for rate-limit safety.
+    return summarizer_node
 
 
-def _make_designer_node(llm_connector: LlmConnector, model_name: str | None = None):
-    """Return a designer node that processes all remaining chunks in parallel.
+def _parse_summarizer_json(content: str) -> dict | None:
+    """Extract a JSON object from the summarizer's response text."""
+    # Try direct parse
+    try:
+        return json.loads(content.strip())
+    except json.JSONDecodeError:
+        pass
 
-    All chunks are independent extractions, so they are submitted to a
-    ThreadPoolExecutor simultaneously.  The node advances current_chunk_index
-    past every remaining chunk in one step, so the router always goes directly
-    to finalize rather than looping back.
-    """
-    import json
-    import re
-
-    # Lazy: get_model() is deferred to first invocation so that graph build
-    # does not trigger a potentially blocking network call on construction.
-    _model_cache: list = []
-
-    def _get_model():
-        if not _model_cache:
-            _model_cache.append(llm_connector.get_model(model_name))
-        return _model_cache[0]
-
-    def _process_one_chunk(
-        chunk: str, chunk_num: int, total: int
-    ) -> tuple[dict | None, object | None]:
-        """Call the LLM for a single chunk. Returns (partial_dict, response) or (None, None)."""
-        annotation = (
-            _DESIGNER_CHUNK_SUFFIX.format(chunk_num=chunk_num, total_chunks=total)
-            if total > 1
-            else ""
-        )
-        system = (
-            _DESIGNER_SYSTEM_PROMPT_TEMPLATE.format(input_text=chunk + annotation)
-            + _DESIGNER_JSON_SUFFIX
-        )
-        log.info("designer_node: chunk %d/%d — %d chars", chunk_num, total, len(chunk))
+    # Try stripping markdown fencing
+    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
+    if fence_match:
         try:
-            response = _invoke_llm_with_timeout(
-                _get_model(),
-                [
-                    SystemMessage(content=system),
-                    HumanMessage(content="Build the specified ZWorld. Respond ONLY with the JSON object."),
-                ],
-                _LLM_TIMEOUT_SECONDS,
-            )
-        except TimeoutError as exc:
-            log.warning("designer_node: chunk %d/%d timed out — %s", chunk_num, total, exc)
-            return None, None
+            return json.loads(fence_match.group(1))
+        except json.JSONDecodeError:
+            pass
 
-        content = str(getattr(response, "content", ""))
-        log.info(
-            "designer_node: chunk %d/%d responded — length=%d  preview: %r",
-            chunk_num, total, len(content), content[:300],
-        )
+    # Try finding first { to last }
+    brace_start = content.find("{")
+    brace_end = content.rfind("}")
+    if brace_start >= 0 and brace_end > brace_start:
+        try:
+            return json.loads(content[brace_start : brace_end + 1])
+        except json.JSONDecodeError:
+            pass
 
-        parsed = None
-        fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
-        if fence_match:
-            try:
-                parsed = json.loads(fence_match.group(1))
-            except json.JSONDecodeError:
-                pass
-
-        if parsed is None:
-            brace_match = re.search(r"\{", content)
-            if brace_match:
-                json_candidate = content[brace_match.start():]
-                try:
-                    parsed = json.loads(json_candidate)
-                except json.JSONDecodeError:
-                    last_brace = json_candidate.rfind("}")
-                    while last_brace > 0:
-                        try:
-                            parsed = json.loads(json_candidate[: last_brace + 1])
-                            break
-                        except json.JSONDecodeError:
-                            last_brace = json_candidate.rfind("}", 0, last_brace)
-
-        if parsed and isinstance(parsed, dict):
-            log.info(
-                "designer_node: chunk %d/%d parsed — name=%r  chars=%d  locs=%d  rels=%d",
-                chunk_num, total,
-                parsed.get("name"),
-                len(parsed.get("characters", [])),
-                len(parsed.get("locations", [])),
-                len(parsed.get("relationships", [])),
-            )
-            return {
-                "name": parsed.get("name", "Unknown World"),
-                "summary": parsed.get("summary", ""),
-                "characters": parsed.get("characters", []),
-                "locations": parsed.get("locations", []),
-                "events": parsed.get("events", []),
-                "mechanics": parsed.get("mechanics", []),
-                "tropes": parsed.get("tropes", []),
-                "species": parsed.get("species", []),
-                "occupations": parsed.get("occupations", []),
-                "relationships": parsed.get("relationships", []),
-            }, response
-        else:
-            log.warning(
-                "designer_node: could not parse JSON from chunk %d — skipping", chunk_num
-            )
-            return None, response
-
-    @log_node("designer")
-    def designer_node(state: CreateWorldState) -> dict:
-        chunks = state.get("input_chunks") or [state["input_text"]]
-        start_idx = state.get("current_chunk_index", 0)
-        total = len(chunks)
-        remaining = chunks[start_idx:]
-
-        log.info(
-            "designer_node: processing %d remaining chunk(s) (of %d total) in parallel",
-            len(remaining), total,
-        )
-
-        partials: list[dict] = []
-        responses: list = []
-
-        workers = min(len(remaining), _DESIGNER_MAX_WORKERS)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            future_map = {
-                executor.submit(_process_one_chunk, chunk, start_idx + i + 1, total): i
-                for i, chunk in enumerate(remaining)
-            }
-            for future in concurrent.futures.as_completed(future_map):
-                partial, response = future.result()
-                if response is not None:
-                    responses.append(response)
-                if partial is not None:
-                    partials.append(partial)
-
-        # Advance current_chunk_index past ALL remaining chunks in one step.
-        # current_chunk_index uses operator.add, so returning len(remaining) as
-        # the delta advances start_idx → start_idx + len(remaining) == total,
-        # which causes _route_after_designer to go directly to "finalize".
-        if not partials:
-            log.warning("designer_node: no chunks produced valid JSON")
-            return {
-                "status": "failed",
-                "failure_reason": "LLM call timed out",
-                "status_message": "World creation paused: LLM timeout",
-                "current_chunk_index": len(remaining),
-            }
-
-        first_name = partials[0].get("name", "Unknown World")
-        log.info(
-            "designer_node: %d/%d chunk(s) succeeded — name=%r",
-            len(partials), len(remaining), first_name,
-        )
-        return {
-            "messages": responses,
-            "partial_zworlds": partials,
-            "current_chunk_index": len(remaining),
-            "status": "awaiting_generation",
-            "status_message": (
-                f"Extracted entities from {len(partials)}/{len(remaining)} "
-                f"chunk(s) for '{first_name}'"
-            ),
-        }
-
-    return designer_node
+    return None
 
 
-def _make_finalizer_node():
-    """Return a deterministic node that merges partial ZWorld extractions and writes the Z-Bundle."""
+def _make_finalizer_node(zworld_manager):
+    """Return a deterministic node that constructs ZWorld and writes the Z-Bundle."""
 
     @log_node("finalizer")
     def finalizer_node(state: CreateWorldState) -> dict:
-        from zforge.models.zworld import (
-            Character,
-            CharacterName,
-            Event,
-            Location,
-            Mechanic,
-            Occupation,
-            Relationship,
-            Species,
-            Trope,
-            ZWorld,
-        )
+        from zforge.models.zworld import ZWorld
 
-        partials = state.get("partial_zworlds") or []
-        if not partials:
-            log.error("finalizer_node: no partial_zworlds in state")
+        kvp = state.get("zworld_kvp")
+        if not kvp:
+            log.error("finalizer_node: no zworld_kvp in state")
             return {
                 "status": "failed",
-                "failure_reason": "Designer produced no ZWorld data",
-                "status_message": "World creation failed: no data extracted",
+                "failure_reason": "Summarizer produced no metadata",
+                "status_message": "World creation failed: no metadata extracted",
             }
 
-        # Name and summary come from the first (primary) partial.
-        name = partials[0].get("name", "Unknown World")
-        summaries = [p.get("summary", "") for p in partials if p.get("summary")]
-        summary = summaries[0] if summaries else ""
+        title = kvp.get("title", "Unknown World")
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
 
-        char_map: dict = {}
-        loc_map: dict = {}
-        event_seen: set = set()
-        events: list = []
-        mechanics: list = []
-        tropes: list = []
-        species: list = []
-        occupations: list = []
-        rel_seen: set = set()
-        relationships: list = []
-
-        for partial in partials:
-            for c in partial.get("characters", []):
-                cid = c.get("id")
-                if cid and cid not in char_map:
-                    char_map[cid] = c
-            for loc in partial.get("locations", []):
-                lid = loc.get("id")
-                if lid and lid not in loc_map:
-                    loc_map[lid] = loc
-            for e in partial.get("events", []):
-                key = e.get("description", "")[:80]
-                if key not in event_seen:
-                    event_seen.add(key)
-                    events.append(e)
-            for item in partial.get("mechanics", []):
-                if item not in mechanics:
-                    mechanics.append(item)
-            for item in partial.get("tropes", []):
-                if item not in tropes:
-                    tropes.append(item)
-            for item in partial.get("species", []):
-                if item not in species:
-                    species.append(item)
-            for item in partial.get("occupations", []):
-                if item not in occupations:
-                    occupations.append(item)
-            for r in partial.get("relationships", []):
-                key = (r.get("from_id"), r.get("to_id"), r.get("type"))
-                if key not in rel_seen:
-                    rel_seen.add(key)
-                    relationships.append(r)
-
-        log.info(
-            "finalizer_node: merged %d partial(s) — %d chars, %d locs, "
-            "%d rels, %d events",
-            len(partials), len(char_map), len(loc_map),
-            len(relationships), len(events),
-        )
-
-        def _parse_names(raw_names: list[dict]) -> list[CharacterName]:
-            return [
-                CharacterName(name=n["name"], context=n.get("context"))
-                for n in raw_names
-                if "name" in n
-            ]
-
-        def _parse_locations(raw_locs: list[dict]) -> list[Location]:
-            result = []
-            for loc in raw_locs:
-                result.append(Location(
-                    id=loc["id"],
-                    name=loc.get("name", ""),
-                    description=loc.get("description", ""),
-                    sublocations=_parse_locations(loc.get("sublocations", [])),
-                ))
-            return result
-
-        slug = name.lower().replace(" ", "-")
         zworld = ZWorld(
-            title=name,
+            title=title,
             slug=slug,
             uuid=str(uuid_mod.uuid4()),
-            summary=summary,
-            characters=[
-                Character(
-                    id=c["id"],
-                    names=_parse_names(c.get("names", [])),
-                    history=c.get("history", ""),
-                )
-                for c in char_map.values()
-            ],
-            locations=_parse_locations(list(loc_map.values())),
-            events=[
-                Event(description=e["description"], time=e.get("time", ""))
-                for e in events
-            ],
-            mechanics=[Mechanic(text=m) for m in mechanics],
-            tropes=[Trope(text=t) for t in tropes],
-            species=[Species(text=s) for s in species],
-            occupations=[Occupation(text=o) for o in occupations],
-            relationships=[
-                Relationship(from_id=r["from_id"], to_id=r["to_id"], type=r["type"])
-                for r in relationships
-                if r.get("from_id") and r.get("to_id") and r.get("type")
-            ],
+            summary=kvp.get("summary", ""),
+            setting_era=kvp.get("setting_era", ""),
+            source_canon=kvp.get("source_canon", []),
+            content_advisories=kvp.get("content_advisories", []),
         )
 
-        mgr = get_zworld_manager()
-        if mgr is not None:
-            mgr.create(zworld)
+        if zworld_manager is not None:
+            # Rename Z-Bundle directory from temp slug to final slug
+            old_root = state.get("z_bundle_root", "")
+            new_root = os.path.join(os.path.dirname(old_root), slug) if old_root else ""
+            if old_root and new_root and old_root != new_root and os.path.exists(old_root):
+                os.rename(old_root, new_root)
+
+            zworld_manager.create(zworld, raw_text=state["input_text"])
         else:
-            log.error("finalizer_node: ZWorldManager not injected — Z-Bundle not written")
+            log.error(
+                "finalizer_node: ZWorldManager not provided — Z-Bundle not written"
+            )
 
         return {
+            "z_bundle_root": new_root if old_root != new_root else old_root,
             "status": "complete",
-            "status_message": f"World '{name}' created successfully",
+            "status_message": f"World '{title}' created successfully",
         }
 
     return finalizer_node
@@ -599,90 +346,85 @@ def _make_finalizer_node():
 # --- Routing ---
 
 
-def _route_after_editor(state: CreateWorldState) -> str:
-    status = state["status"]
-    validation_count = state.get("validation_iterations", 0)
-    log.info(
-        "_route_after_editor: status=%r  validation_iterations=%d/%d",
-        status, validation_count, MAX_VALIDATION_ATTEMPTS,
-    )
-    if status == "awaiting_generation":
-        decision = "designer"
-    elif status in ("awaiting_validation", "awaiting_rejection_explanation"):
-        decision = "editor"
-    elif status in ("complete", "failed"):
-        decision = "end"
-    else:
-        log.error("_route_after_editor: unrecognised status=%r — routing to end", status)
-        decision = "end"
-    log.info("_route_after_editor: decision=%r", decision)
-    return decision
-
-
-def _route_after_designer(state: CreateWorldState) -> str:
-    status = state["status"]
-    chunks = state.get("input_chunks") or []
-    chunk_idx = state.get("current_chunk_index", 0)
-    log.info(
-        "_route_after_designer: status=%r  chunk=%d/%d",
-        status, chunk_idx, len(chunks),
-    )
-    if status == "awaiting_generation":
-        if not chunks or chunk_idx >= len(chunks):
-            decision = "finalize"
-        else:
-            decision = "designer"
-    elif status in ("complete", "failed"):
-        decision = "end"
-    else:
-        log.error("_route_after_designer: unrecognised status=%r — routing to end", status)
-        decision = "end"
-    log.info("_route_after_designer: decision=%r", decision)
-    return decision
+def _route_after_summarizer(state: CreateWorldState) -> str:
+    """Loop back to summarizer if tool calls are pending, else finalize."""
+    status = state.get("status", "")
+    if status == "finalizing":
+        return "finalizer"
+    if status == "failed":
+        return "end"
+    # Still summarizing (tool calls were made) — loop back
+    return "summarizer"
 
 
 # --- Graph Builder ---
 
 
 def build_create_world_graph(
-    editor_connector: LlmConnector,
-    designer_connector: LlmConnector,
-    editor_model: str | None = None,
-    designer_model: str | None = None,
+    summarizer_connector: LlmConnector,
+    contextualizer_connector: LlmConnector,
+    graph_extractor_connector: LlmConnector,
+    embedding_connector: EmbeddingConnector,
+    zworld_manager: ZWorldManager,
+    config,
+    bundles_root: str,
+    summarizer_model: str | None = None,
+    contextualizer_model: str | None = None,
+    graph_extractor_model: str | None = None,
 ):
     """Build and compile the world creation LangGraph StateGraph.
 
     Parameters
     ----------
-    editor_connector / designer_connector:
-        Per-node LLM connectors resolved from the ``llm_nodes`` config.
-    editor_model / designer_model:
-        Model name overrides passed to the respective connector's
-        ``get_model()`` method.  *None* uses the connector default.
+    summarizer_connector:
+        LLM connector for the Step 2 summarizer (agentic RAG).
+    contextualizer_connector / graph_extractor_connector:
+        LLM connectors for the document_parsing sub-graph.
+    embedding_connector:
+        Embedding connector for vector ingestion and retriever tools.
+    zworld_manager:
+        ZWorldManager instance for writing the final Z-Bundle.
+    config:
+        ZForgeConfig providing parsing_chunk_size and parsing_chunk_overlap.
+    bundles_root:
+        Root directory for Z-Bundles (e.g. "bundles/").
+    summarizer_model / contextualizer_model / graph_extractor_model:
+        Optional model name overrides.
     """
-    context_size = editor_connector.get_context_size()
-    log.info("build_create_world_graph: context_size=%d", context_size)
-
     graph = StateGraph(CreateWorldState)
 
-    graph.add_node("chunker", _make_chunker_node(context_size))
-    graph.add_node("editor", _make_editor_node(editor_connector, editor_model))
-    graph.add_node("designer", _make_designer_node(designer_connector, designer_model))
-    graph.add_node("finalize", _make_finalizer_node())
+    graph.add_node(
+        "document_parsing",
+        _make_document_parsing_node(
+            contextualizer_connector=contextualizer_connector,
+            graph_extractor_connector=graph_extractor_connector,
+            embedding_connector=embedding_connector,
+            config=config,
+            bundles_root=bundles_root,
+            contextualizer_model=contextualizer_model,
+            graph_extractor_model=graph_extractor_model,
+        ),
+    )
+    graph.add_node(
+        "summarizer",
+        _make_summarizer_node(
+            summarizer_connector, embedding_connector, summarizer_model
+        ),
+    )
+    graph.add_node("finalizer", _make_finalizer_node(zworld_manager))
 
-    graph.set_entry_point("chunker")
-    graph.add_edge("chunker", "editor")
-    graph.add_edge("finalize", END)
-    graph.add_conditional_edges("editor", _route_after_editor, {
-        "editor": "editor",
-        "designer": "designer",
-        "end": END,
-    })
-    graph.add_conditional_edges("designer", _route_after_designer, {
-        "designer": "designer",
-        "finalize": "finalize",
-        "end": END,
-    })
+    graph.set_entry_point("document_parsing")
+    graph.add_edge("document_parsing", "summarizer")
+    graph.add_conditional_edges(
+        "summarizer",
+        _route_after_summarizer,
+        {
+            "summarizer": "summarizer",
+            "finalizer": "finalizer",
+            "end": END,
+        },
+    )
+    graph.add_edge("finalizer", END)
 
     return graph.compile()
 

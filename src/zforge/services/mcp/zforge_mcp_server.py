@@ -20,7 +20,13 @@ if TYPE_CHECKING:
 
 
 class ZForgeMcpServer:
-    """External MCP server exposing Z-Forge tools to external agents."""
+    """External MCP server exposing Z-Forge tools to external agents.
+
+    NOTE: The old ``CreateZWorld`` tool (which delegated to
+    ``world_create_zworld``) has been removed.  World creation is now
+    driven by the full LangGraph pipeline via ``ZForgeManager``.
+    MCP tools for the new pipeline will be added in a future update.
+    """
 
     def __init__(self) -> None:
         self._server = Server("zforge")
@@ -33,56 +39,11 @@ class ZForgeMcpServer:
     def _setup_tools(self) -> None:
         @self._server.list_tools()
         async def list_tools() -> list[Tool]:
-            return [
-                Tool(
-                    name="CreateZWorld",
-                    description=(
-                        "Create a ZWorld from the provided properties. "
-                        "See docs/Z-World.md for the full specification."
-                    ),
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string", "description": "Display name"},
-                            "summary": {"type": "string", "description": "1-3 paragraph diegetic summary"},
-                            "characters": {"type": "array"},
-                            "locations": {"type": "array"},
-                            "events": {"type": "array"},
-                            "mechanics": {"type": "array", "items": {"type": "string"}},
-                            "tropes": {"type": "array", "items": {"type": "string"}},
-                            "species": {"type": "array", "items": {"type": "string"}},
-                            "occupations": {"type": "array", "items": {"type": "string"}},
-                            "relationships": {"type": "array"},
-                        },
-                        "required": ["name", "summary"],
-                    },
-                ),
-            ]
+            return []
 
         @self._server.call_tool()
         async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-            if name == "CreateZWorld":
-                return await self._handle_create_zworld(arguments)
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
-
-    async def _handle_create_zworld(
-        self, arguments: dict[str, Any]
-    ) -> list[TextContent]:
-        if self._zworld_manager is None:
-            return [
-                TextContent(type="text", text="ZWorldManager not initialized")
-            ]
-        from zforge.tools.world_tools import world_create_zworld
-
-        # Delegate to the same tool function used by the LangGraph pipeline
-        result = world_create_zworld.invoke(arguments)
-        title = arguments.get("name", "Unknown")
-        return [
-            TextContent(
-                type="text",
-                text=f"ZWorld '{title}' created successfully.",
-            )
-        ]
 
     @property
     def server(self) -> Server:

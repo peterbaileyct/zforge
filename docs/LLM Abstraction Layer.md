@@ -29,7 +29,7 @@ Each LLM connector, corresponding to a specific LLM provider, defines the follow
   Connectors integrate with LangGraph by returning a LangChain `BaseChatModel` via `get_model()`. Graph nodes hold a reference to the connector and call `get_model()` lazily (on first invocation) so that graph construction does not trigger network calls.
 
   - For plain-text routing nodes, the node calls `model.invoke(messages)` and a conditional edge function reads graph state to decide the next node.
-  - For tool-call routing nodes, the node calls `model.bind_tools(tools).invoke(messages)`; a LangGraph `ToolNode` handles tool execution, and `tools_condition` or a custom conditional edge routes based on whether a tool call was made.
+  - For tool-call routing nodes (agentic RAG), the node calls `model.bind_tools(tools).invoke(messages)` and iterates `response.tool_calls` directly via the Processes.md self-loop pattern (e.g. World Generation Summarizer). Tool functions are invoked inline and `ToolMessage`s are appended manually — no `ToolNode` is used.
   - Chunk parallelism in World Creation is currently implemented with `ThreadPoolExecutor` inside a single graph node. The LangGraph-native alternative is the [Send API](https://langchain-ai.github.io/langgraph/concepts/low_level/#send) (fan-out / map-reduce), which would make parallelism visible to the LangGraph runtime. This is a candidate future refactor.
 
   ### APIs

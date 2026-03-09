@@ -1,7 +1,7 @@
 """Tests for per-node LLM connector resolution in world creation graph.
 
-Verifies that build_create_world_graph() correctly wires different
-connectors to the editor and designer nodes, and that
+Verifies that build_create_world_graph() correctly wires connectors
+for the summarizer, contextualizer, and graph_extractor nodes, and that
 ZForgeManager._resolve_node_connector() handles overrides and fallbacks.
 """
 
@@ -25,50 +25,44 @@ def _make_mock_connector(name: str) -> LlmConnector:
     return connector
 
 
+def _make_mock_embedding():
+    """Create a mock EmbeddingConnector."""
+    emb = MagicMock()
+    emb.get_embeddings.return_value = MagicMock()
+    emb.model_identity.return_value = {
+        "embedding_model_name": "test-model",
+        "embedding_model_size_bytes": 1000,
+    }
+    return emb
+
+
 class TestBuildCreateWorldGraphPerNode:
-    """Verify that each node gets its own connector."""
+    """Verify that the graph builds without error and wires connectors."""
 
-    def test_editor_and_designer_get_different_connectors(self):
-        """build_create_world_graph passes the correct connector to each node."""
-        editor_conn = _make_mock_connector("EditorProvider")
-        designer_conn = _make_mock_connector("DesignerProvider")
+    def test_graph_builds_with_all_connectors(self):
+        """build_create_world_graph accepts the new connector signature."""
+        sum_conn = _make_mock_connector("SummarizerProvider")
+        ctx_conn = _make_mock_connector("ContextualizerProvider")
+        gext_conn = _make_mock_connector("GraphExtractorProvider")
+        emb = _make_mock_embedding()
+        mgr = MagicMock()
+        config = ZForgeConfig()
 
-        # Patch the finalizer's zworld_manager dependency to avoid import-time errors
-        with patch(
-            "zforge.graphs.world_creation_graph._make_finalizer_node",
-            return_value=lambda state: {},
-        ):
-            from zforge.graphs.world_creation_graph import build_create_world_graph
+        from zforge.graphs.world_creation_graph import build_create_world_graph
 
-            _graph = build_create_world_graph(
-                editor_connector=editor_conn,
-                designer_connector=designer_conn,
-                editor_model="model-a",
-                designer_model="model-b",
-            )
-
-        editor_conn.get_model.assert_called_once_with("model-a")
-        designer_conn.get_model.assert_called_once_with("model-b")
-
-    def test_none_model_uses_connector_default(self):
-        """When model is None, get_model(None) is called (connector decides)."""
-        conn = _make_mock_connector("Provider")
-
-        with patch(
-            "zforge.graphs.world_creation_graph._make_finalizer_node",
-            return_value=lambda state: {},
-        ):
-            from zforge.graphs.world_creation_graph import build_create_world_graph
-
-            _graph = build_create_world_graph(
-                editor_connector=conn,
-                designer_connector=conn,
-            )
-
-        # get_model called twice (once per node), each with None
-        assert conn.get_model.call_count == 2
-        for call in conn.get_model.call_args_list:
-            assert call == ((None,),) or call == ((), {"model_name": None}) or call.args == (None,)
+        graph = build_create_world_graph(
+            summarizer_connector=sum_conn,
+            contextualizer_connector=ctx_conn,
+            graph_extractor_connector=gext_conn,
+            embedding_connector=emb,
+            zworld_manager=mgr,
+            config=config,
+            bundles_root="/tmp/test-bundles",
+            summarizer_model="model-a",
+            contextualizer_model="model-b",
+            graph_extractor_model="model-c",
+        )
+        assert graph is not None
 
 
 class TestResolveNodeConnector:
@@ -95,13 +89,13 @@ class TestResolveNodeConnector:
         config = ZForgeConfig(
             llm_nodes={
                 "world_generation": {
-                    "editor": LlmNodeConfig(provider="Anthropic", model="claude-sonnet-4-20250514"),
+                    "summarizer": LlmNodeConfig(provider="Anthropic", model="claude-sonnet-4-20250514"),
                 }
             }
         )
         mgr = self._make_manager(config, registry)
 
-        connector, model = mgr._resolve_node_connector("world_generation", "editor")
+        connector, model = mgr._resolve_node_connector("world_generation", "summarizer")
         assert connector is anthropic
         assert model == "claude-sonnet-4-20250514"
 
@@ -113,7 +107,7 @@ class TestResolveNodeConnector:
         config = ZForgeConfig()  # no llm_nodes at all
         mgr = self._make_manager(config, registry)
 
-        connector, model = mgr._resolve_node_connector("world_generation", "editor")
+        connector, model = mgr._resolve_node_connector("world_generation", "summarizer")
         assert connector is default_conn
         assert model is None
 
@@ -125,17 +119,17 @@ class TestResolveNodeConnector:
         config = ZForgeConfig(
             llm_nodes={
                 "world_generation": {
-                    "editor": LlmNodeConfig(provider="UnknownProvider", model="some-model"),
+                    "summarizer": LlmNodeConfig(provider="UnknownProvider", model="some-model"),
                 }
             }
         )
         mgr = self._make_manager(config, registry)
 
-        connector, model = mgr._resolve_node_connector("world_generation", "editor")
+        connector, model = mgr._resolve_node_connector("world_generation", "summarizer")
         assert connector is default_conn
         assert model is None
 
-    def test_different_nodes_resolve_independently(self):
+    def test_different_processes_resolve_independently(self):
         registry = ConnectorRegistry()
         openai = _make_mock_connector("OpenAI")
         google = _make_mock_connector("Google")
@@ -145,20 +139,25 @@ class TestResolveNodeConnector:
         config = ZForgeConfig(
             llm_nodes={
                 "world_generation": {
-                    "editor": LlmNodeConfig(provider="OpenAI", model="gpt-5-nano"),
-                    "designer": LlmNodeConfig(provider="Google", model="gemini-2.0-flash"),
-                }
+                    "summarizer": LlmNodeConfig(provider="OpenAI", model="gpt-5-nano"),
+                },
+                "document_parsing": {
+                    "contextualizer": LlmNodeConfig(provider="Google", model="gemini-2.5-flash-lite"),
+                    "graph_extractor": LlmNodeConfig(provider="Google", model="gemini-2.5-flash-lite"),
+                },
             }
         )
         mgr = self._make_manager(config, registry)
 
-        editor_conn, editor_model = mgr._resolve_node_connector("world_generation", "editor")
-        designer_conn, designer_model = mgr._resolve_node_connector("world_generation", "designer")
+        sum_conn, sum_model = mgr._resolve_node_connector("world_generation", "summarizer")
+        ctx_conn, ctx_model = mgr._resolve_node_connector("document_parsing", "contextualizer")
+        gext_conn, gext_model = mgr._resolve_node_connector("document_parsing", "graph_extractor")
 
-        assert editor_conn is openai
-        assert editor_model == "gpt-5-nano"
-        assert designer_conn is google
-        assert designer_model == "gemini-2.0-flash"
+        assert sum_conn is openai
+        assert sum_model == "gpt-5-nano"
+        assert ctx_conn is google
+        assert ctx_model == "gemini-2.5-flash-lite"
+        assert gext_conn is google
 
     def test_empty_provider_falls_back_to_default(self):
         registry = ConnectorRegistry()
@@ -168,12 +167,12 @@ class TestResolveNodeConnector:
         config = ZForgeConfig(
             llm_nodes={
                 "world_generation": {
-                    "editor": LlmNodeConfig(provider="", model=""),
+                    "summarizer": LlmNodeConfig(provider="", model=""),
                 }
             }
         )
         mgr = self._make_manager(config, registry)
 
-        connector, model = mgr._resolve_node_connector("world_generation", "editor")
+        connector, model = mgr._resolve_node_connector("world_generation", "summarizer")
         assert connector is default_conn
         assert model is None

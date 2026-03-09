@@ -104,6 +104,7 @@ class ZForgeApp(toga.App):
             connector_registry=registry,
             config=config,
             if_engine_connector=if_engine,
+            embedding_connector=embedding_connector,
         )
         self._app_state.zforge_manager = zforge_manager
 

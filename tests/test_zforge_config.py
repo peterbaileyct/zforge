@@ -89,33 +89,36 @@ class TestZForgeConfigLlmNodes:
 
 class TestConfigServiceDefaults:
     def test_apply_defaults_populates_llm_nodes(self):
-        """_apply_defaults fills in world_generation editor/designer defaults."""
+        """_apply_defaults fills in world_generation summarizer and document_parsing defaults."""
         config = ZForgeConfig()
         ConfigService._apply_defaults(config)
 
         assert "world_generation" in config.llm_nodes
-        editor = config.llm_nodes["world_generation"]["editor"]
-        designer = config.llm_nodes["world_generation"]["designer"]
-        assert editor.provider == "OpenAI"
-        assert editor.model == "gpt-5-nano"
-        assert designer.provider == "OpenAI"
-        assert designer.model == "gpt-5-nano"
+        summarizer = config.llm_nodes["world_generation"]["summarizer"]
+        assert summarizer.provider == "Google"
+        assert summarizer.model == "gemini-2.5-flash-lite"
+
+        assert "document_parsing" in config.llm_nodes
+        ctx = config.llm_nodes["document_parsing"]["contextualizer"]
+        gext = config.llm_nodes["document_parsing"]["graph_extractor"]
+        assert ctx.provider == "Google"
+        assert gext.provider == "Google"
 
     def test_apply_defaults_preserves_existing(self):
         """_apply_defaults does not overwrite user-set values."""
         config = ZForgeConfig(
             llm_nodes={
                 "world_generation": {
-                    "editor": LlmNodeConfig(provider="Anthropic", model="claude-sonnet-4-20250514"),
+                    "summarizer": LlmNodeConfig(provider="Anthropic", model="claude-sonnet-4-20250514"),
                 }
             }
         )
         ConfigService._apply_defaults(config)
 
-        # editor should be preserved
-        assert config.llm_nodes["world_generation"]["editor"].provider == "Anthropic"
-        # designer should be filled in
-        assert config.llm_nodes["world_generation"]["designer"].provider == "OpenAI"
+        # summarizer should be preserved
+        assert config.llm_nodes["world_generation"]["summarizer"].provider == "Anthropic"
+        # document_parsing nodes should be filled in
+        assert config.llm_nodes["document_parsing"]["contextualizer"].provider == "Google"
 
     def test_apply_defaults_preserves_other_processes(self):
         """_apply_defaults doesn't touch nodes for other processes."""

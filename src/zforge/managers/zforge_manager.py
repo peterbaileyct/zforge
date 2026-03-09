@@ -22,10 +22,10 @@ from zforge.managers.experience_manager import ExperienceManager
 from zforge.managers.zworld_manager import ZWorldManager
 from zforge.models.zforge_config import PlayerPreferences, ZForgeConfig
 from zforge.models.zworld import ZWorld
+from zforge.services.embedding.embedding_connector import EmbeddingConnector
 from zforge.services.if_engine.if_engine_connector import IfEngineConnector
 from zforge.services.llm.connector_registry import ConnectorRegistry
 from zforge.services.llm.llm_connector import LlmConnector
-from zforge.tools.experience_tools import set_if_engine_connector
 from zforge.tools.world_tools import set_zworld_manager
 
 
@@ -40,6 +40,7 @@ class ZForgeManager:
         connector_registry: ConnectorRegistry,
         config: ZForgeConfig,
         if_engine_connector: IfEngineConnector,
+        embedding_connector: EmbeddingConnector,
     ) -> None:
         self.zworld_manager = zworld_manager
         self.experience_manager = experience_manager
@@ -47,10 +48,12 @@ class ZForgeManager:
         self._connector_registry = connector_registry
         self._config = config
         self._if_engine_connector = if_engine_connector
+        self._embedding_connector = embedding_connector
         self._world_creation_graph = None
 
         # Inject dependencies for tool functions
         set_zworld_manager(zworld_manager)
+        from zforge.tools.experience_tools import set_if_engine_connector
         set_if_engine_connector(if_engine_connector)
 
     async def run_process(
@@ -89,17 +92,6 @@ class ZForgeManager:
                             f"  (was {prev_status!r})" if status_changed else "",
                             msg,
                         )
-                        # Surface interesting state shape so failures are diagnosable
-                        if any(k in node_output for k in ("status", "validation_iterations", "partial_zworlds", "current_chunk_index")):
-                            partial_count = len(final_state.get("partial_zworlds") or [])
-                            chunk_idx = final_state.get("current_chunk_index", 0)
-                            chunks_total = len(final_state.get("input_chunks") or [])
-                            val_iters = final_state.get("validation_iterations", 0)
-                            log.info(
-                                "run_process: [%s] validation_iterations=%d  "
-                                "chunk=%d/%d  partial_zworlds=%d",
-                                node_name, val_iters, chunk_idx, chunks_total, partial_count,
-                            )
                         if on_status_update and msg:
                             on_status_update(msg)
                         if on_rationale_update and "action_log" in node_output:
@@ -151,27 +143,35 @@ class ZForgeManager:
         """Run the world creation process."""
         if self._world_creation_graph is None:
             log.info("start_world_creation: building graph (first call)")
-            editor_connector, editor_model = self._resolve_node_connector(
-                "world_generation", "editor"
+            # Resolve connectors for document_parsing sub-graph
+            ctx_connector, ctx_model = self._resolve_node_connector(
+                "document_parsing", "contextualizer"
             )
-            designer_connector, designer_model = self._resolve_node_connector(
-                "world_generation", "designer"
+            gext_connector, gext_model = self._resolve_node_connector(
+                "document_parsing", "graph_extractor"
+            )
+            # Resolve connector for world_generation summarizer
+            sum_connector, sum_model = self._resolve_node_connector(
+                "world_generation", "summarizer"
             )
             self._world_creation_graph = build_create_world_graph(
-                editor_connector=editor_connector,
-                designer_connector=designer_connector,
-                editor_model=editor_model,
-                designer_model=designer_model,
+                summarizer_connector=sum_connector,
+                contextualizer_connector=ctx_connector,
+                graph_extractor_connector=gext_connector,
+                embedding_connector=self._embedding_connector,
+                zworld_manager=self.zworld_manager,
+                config=self._config,
+                bundles_root=self._config.bundles_root,
+                summarizer_model=sum_model,
+                contextualizer_model=ctx_model,
+                graph_extractor_model=gext_model,
             )
         graph = self._world_creation_graph
         initial_state = {
             "input_text": input_text,
-            "input_valid": None,
-            "input_chunks": [],
-            "current_chunk_index": 0,
-            "partial_zworlds": [],
-            "validation_iterations": 0,
-            "status": "awaiting_validation",
+            "z_bundle_root": None,
+            "zworld_kvp": None,
+            "status": "parsing",
             "status_message": "Starting world creation...",
             "failure_reason": None,
             "messages": [],
