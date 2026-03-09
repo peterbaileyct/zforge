@@ -1,0 +1,236 @@
+"""LangGraph Ask About World graph.
+
+Single-node agentic RAG graph per docs/Ask About World.md:
+
+1. librarian_node — answers a user question about a Z-World by querying its
+   Z-Bundle via retrieve_vector and retrieve_graph tools, then produces a
+   plain-text answer.
+
+Tool calls are executed inline within the librarian node in a while loop —
+no ToolNode is used (per docs/Processes.md § LangGraph tool call pattern).
+
+Implements: src/zforge/graphs/ask_about_world_graph.py per
+docs/Ask About World.md.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from typing import TYPE_CHECKING
+
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import tool
+from langgraph.graph import END, StateGraph
+
+from zforge.graphs.document_parsing_graph import _LLAMA_EXECUTOR
+from zforge.graphs.graph_utils import extract_text_content, log_node
+from zforge.graphs.state import AskAboutWorldState
+
+log = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from zforge.services.embedding.embedding_connector import EmbeddingConnector
+    from zforge.services.llm.llm_connector import LlmConnector
+
+# --- Librarian prompt (authoritative, from docs/Ask About World.md) ---
+
+_LIBRARIAN_SYSTEM_PROMPT = """\
+You are a reference librarian for a library of interactive fiction worlds. \
+You will receive a JSON document describing a fictional world, e.g. title \
+and brief summary. You will have access to vector and graph databases to \
+provide more information. You will be asked a question about this world and \
+will provide a clear and simple plain-text answer. This will typically be \
+1-3 sentences, though longer responses are acceptable for complex questions."""
+
+
+# --- Node Factory ---
+
+
+def _make_librarian_node(
+    llm_connector, embedding_connector, model_name: str | None = None
+):
+    """Return an agentic RAG node that answers questions about a Z-World."""
+
+    _model_cache: list = []
+
+    @log_node("librarian")
+    async def librarian_node(state: AskAboutWorldState) -> dict:
+        if not _model_cache:
+            _model_cache.append(llm_connector.get_model(model_name))
+        model = _model_cache[0]
+
+        z_bundle_root = state["z_bundle_root"]
+
+        # Build retriever tools for this Z-Bundle
+        @tool
+        async def retrieve_vector(query: str) -> str:
+            """Search the Z-Bundle's vector store for semantically similar chunks.
+
+            Args:
+                query: Natural language search query.
+            """
+            import lancedb
+
+            vector_path = f"{z_bundle_root}/vector"
+            loop = asyncio.get_running_loop()
+            embedder = embedding_connector.get_embeddings()
+            query_vec = await loop.run_in_executor(
+                _LLAMA_EXECUTOR,
+                lambda: embedder.embed_query(query),
+            )
+            db = await lancedb.connect_async(vector_path)
+            table = await db.open_table("chunks")
+            results_arrow = await (
+                await table.search(query_vec, query_type="vector")
+            ).limit(5).to_arrow()
+            texts = results_arrow.column("text").to_pylist()
+            if not texts:
+                return "No results found."
+            return "\n\n---\n\n".join(t for t in texts if t)
+
+        @tool
+        def retrieve_graph(query: str) -> str:
+            """Query the Z-Bundle's property graph for structured entity data.
+
+            Args:
+                query: A Cypher-style query or entity name to look up.
+            """
+            import kuzu
+            from langchain_community.graphs import KuzuGraph
+
+            graph_path = f"{z_bundle_root}/propertygraph"
+            db = kuzu.Database(graph_path)
+            graph = KuzuGraph(db, allow_dangerous_requests=True)
+            schema = graph.get_schema
+            return f"Graph schema:\n{schema}\n\nUse retrieve_vector for detailed content."
+
+        tools = [retrieve_vector, retrieve_graph]
+        tool_map = {t.name: t for t in tools}
+        bound_model = model.bind_tools(tools)
+
+        # Seed messages: two system prompts + user question
+        secondary_prompt = (
+            "The following is a description of the fictional world about "
+            "which you will answer questions.\n\n"
+            + json.dumps(state["zworld_kvp"], indent=2)
+        )
+        messages = [
+            SystemMessage(content=_LIBRARIAN_SYSTEM_PROMPT),
+            SystemMessage(content=secondary_prompt),
+            HumanMessage(content=state["user_question"]),
+        ]
+
+        # Tool-call loop: invoke model, process tool calls, repeat until done
+        while True:
+            response = await bound_model.ainvoke(messages)
+            messages.append(response)
+
+            if not (hasattr(response, "tool_calls") and response.tool_calls):
+                break
+
+            for tc in response.tool_calls:
+                tool_fn = tool_map.get(tc["name"])
+                if tool_fn:
+                    result = await tool_fn.ainvoke(tc["args"])
+                    log.info(
+                        "librarian_node: tool %s returned %d chars",
+                        tc["name"],
+                        len(str(result)),
+                    )
+                    messages.append(
+                        ToolMessage(
+                            content=str(result),
+                            tool_call_id=tc["id"],
+                            name=tc["name"],
+                        )
+                    )
+
+        answer = extract_text_content(getattr(response, "content", ""))
+        return {"answer": answer, "messages": messages}
+
+    return librarian_node
+
+
+# --- Graph Builder ---
+
+
+def build_ask_about_world_graph(
+    llm_connector: LlmConnector,
+    embedding_connector: EmbeddingConnector,
+    model_name: str | None = None,
+):
+    """Build and compile the Ask About World LangGraph StateGraph.
+
+    Parameters
+    ----------
+    llm_connector:
+        LLM connector for the Librarian node.
+    embedding_connector:
+        Embedding connector for the retrieve_vector tool.
+    model_name:
+        Optional model name override.
+    """
+    graph = StateGraph(AskAboutWorldState)
+
+    graph.add_node(
+        "librarian",
+        _make_librarian_node(llm_connector, embedding_connector, model_name),
+    )
+
+    graph.set_entry_point("librarian")
+    graph.add_edge("librarian", END)
+
+    return graph.compile()
+
+
+# --- Entry Point ---
+
+
+async def run_ask_about_world(
+    z_bundle_root: str,
+    zworld_kvp: dict,
+    user_question: str,
+    llm_connector: LlmConnector,
+    embedding_connector: EmbeddingConnector,
+    model_name: str | None = None,
+) -> str:
+    """Build the Ask About World graph, invoke it, and return the answer.
+
+    Parameters
+    ----------
+    z_bundle_root:
+        Filesystem path to the Z-Bundle root directory.
+    zworld_kvp:
+        Full KVP JSON dict for the Z-World.
+    user_question:
+        Raw user question text.
+    llm_connector:
+        LLM connector for the Librarian node.
+    embedding_connector:
+        Embedding connector for the retrieve_vector tool.
+    model_name:
+        Optional model name override.
+
+    Returns
+    -------
+    str
+        Plain-text answer string.
+    """
+    graph = build_ask_about_world_graph(
+        llm_connector=llm_connector,
+        embedding_connector=embedding_connector,
+        model_name=model_name,
+    )
+
+    initial_state: AskAboutWorldState = {
+        "z_bundle_root": z_bundle_root,
+        "zworld_kvp": zworld_kvp,
+        "user_question": user_question,
+        "answer": "",
+        "messages": [],
+    }
+
+    result = await graph.ainvoke(initial_state)
+    return result.get("answer", "")

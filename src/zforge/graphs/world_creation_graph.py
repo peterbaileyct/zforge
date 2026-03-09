@@ -29,7 +29,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langgraph.graph import END, StateGraph
 
-from zforge.graphs.graph_utils import log_node
+from zforge.graphs.graph_utils import extract_text_content, log_node
 from zforge.graphs.state import CreateWorldState
 from zforge.graphs.document_parsing_graph import _LLAMA_EXECUTOR
 
@@ -242,7 +242,7 @@ def _make_summarizer_node(
             )
         else:
             # No tool calls — LLM has produced its final answer
-            content = str(getattr(response, "content", ""))
+            content = extract_text_content(getattr(response, "content", ""))
             kvp = _parse_summarizer_json(content)
             if kvp:
                 state_updates["zworld_kvp"] = kvp

@@ -63,6 +63,18 @@ PROCESSES: list[ProcessSpec] = [
             ),
         ),
     ),
+    ProcessSpec(
+        slug="ask_about_world",
+        display="Ask About World",
+        nodes=(
+            NodeSpec(
+                slug="librarian",
+                display="Librarian",
+                default_provider="Google",
+                default_model="gemini-2.5-flash",
+            ),
+        ),
+    ),
 ]
 
 # RemoteConnector → keyring key for its API key.  Used by the config UI to

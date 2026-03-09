@@ -3,6 +3,7 @@
 ExperienceGenerationState per docs/Experience Generation.md.
 CreateWorldState per docs/World Generation.md.
 DocumentParsingState per docs/Parsing Documents to Z-Bundles.md.
+AskAboutWorldState per docs/Ask About World.md.
 
 Uses Annotated[int, operator.add] for iteration counters and
 Annotated[list, add_messages] for LangGraph message history.
@@ -84,4 +85,17 @@ class CreateWorldState(TypedDict):
     status: str
     status_message: str
     failure_reason: str | None
+    messages: Annotated[list, add_messages]
+
+
+class AskAboutWorldState(TypedDict):
+    """State for the Ask About World agentic RAG LangGraph graph.
+
+    Per docs/Ask About World.md § Implementation.
+    """
+
+    z_bundle_root: str
+    zworld_kvp: dict
+    user_question: str
+    answer: str
     messages: Annotated[list, add_messages]

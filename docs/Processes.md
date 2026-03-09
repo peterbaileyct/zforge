@@ -36,3 +36,6 @@ The correct pattern for every agent node that drives state transitions:
 5. Return all state updates and messages in a single dict from the node — no separate `tools` node or `ToolNode` is needed.
 
 Routing conditional edges are placed directly after agent nodes (not after a shared `tools` node), because the state is now fully updated by the time the node returns.
+
+#### Extracting text from `response.content`
+**Do not call `str(response.content)` directly.** Models with thinking/reasoning capabilities — including **Gemini 2.5 Flash** and Anthropic extended-thinking models — return `response.content` as a list of typed content-block dicts (e.g. `[{"type": "text", "text": "...", "extras": {"signature": "..."}}]`), not a plain string. Calling `str()` produces the Python repr of the list rather than the answer text. The correct pattern is to call `graph_utils.extract_text_content(response.content)`, which handles both the plain-string form (non-thinking models) and the list-of-blocks form by concatenating `type: "text"` blocks and dropping thinking blocks.

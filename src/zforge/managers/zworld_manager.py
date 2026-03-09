@@ -167,6 +167,57 @@ class ZWorldManager:
         return worlds
 
     # ------------------------------------------------------------------
+    # ASK (Agentic RAG)
+    # ------------------------------------------------------------------
+
+    async def ask(
+        self,
+        slug: str,
+        question: str,
+        llm_connector,
+        model_name: str | None = None,
+    ) -> str:
+        """Answer a question about a world using agentic RAG.
+
+        Reads the Z-Bundle KVP, builds the Ask About World graph, and
+        returns the plain-text answer.
+
+        Parameters
+        ----------
+        slug:
+            Z-World slug identifying the Z-Bundle.
+        question:
+            Raw user question text.
+        llm_connector:
+            Pre-resolved LLM connector for the Librarian node.
+        model_name:
+            Optional model name override.
+
+        Returns
+        -------
+        str
+            Plain-text answer string.
+        """
+        root = self._world_root(slug)
+        kvp_path = root / "kvp.json"
+        if not kvp_path.exists():
+            return f"World '{slug}' not found."
+
+        with open(kvp_path, "r", encoding="utf-8") as f:
+            zworld_kvp = json.load(f)
+
+        from zforge.graphs.ask_about_world_graph import run_ask_about_world
+
+        return await run_ask_about_world(
+            z_bundle_root=str(root),
+            zworld_kvp=zworld_kvp,
+            user_question=question,
+            llm_connector=llm_connector,
+            embedding_connector=self._embedding,
+            model_name=model_name,
+        )
+
+    # ------------------------------------------------------------------
     # DELETE
     # ------------------------------------------------------------------
 

@@ -163,3 +163,29 @@ def chunk_text(text: str, max_chars: int, overlap_chars: int = 200) -> list[str]
         # when a boundary is found close to start (overlap would go backward).
         start = max(end - overlap_chars, start + 1)
     return chunks
+
+
+def extract_text_content(content: Any) -> str:  # noqa: ANN401
+    """Extract plain text from an LLM ``response.content`` value.
+
+    Different LLM connectors return different types for ``response.content``:
+
+    * OpenAI / Google — a plain ``str``.
+    * Anthropic — a **list** of typed content-block dicts, e.g.::
+
+        [{'type': 'text', 'text': '...', 'extras': {'signature': '...'}}]
+
+    Calling ``str()`` on the list produces the repr of that list rather than
+    the answer text.  This helper normalises both cases.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "".join(parts)
+    return str(content)

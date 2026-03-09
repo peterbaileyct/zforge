@@ -195,3 +195,28 @@ class ZForgeManager:
             "Experience generation has not yet been updated for the new "
             "Z-Bundle world format. This will be implemented in a future update."
         )
+
+    async def ask_about_world(self, slug: str, question: str) -> str:
+        """Answer a question about a world using agentic RAG.
+
+        Resolves the Librarian node's LLM connector, then delegates to
+        ``ZWorldManager.ask()``.
+
+        Parameters
+        ----------
+        slug:
+            Z-World slug identifying the Z-Bundle.
+        question:
+            Raw user question text.
+
+        Returns
+        -------
+        str
+            Plain-text answer string.
+        """
+        lib_connector, lib_model = self._resolve_node_connector(
+            "ask_about_world", "librarian"
+        )
+        return await self.zworld_manager.ask(
+            slug, question, lib_connector, model_name=lib_model
+        )

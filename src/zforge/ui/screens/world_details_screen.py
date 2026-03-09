@@ -1,6 +1,6 @@
 """World Details Screen.
 
-Displays world title, summary, and a question/answer interface (stub).
+Displays world title, summary, and a question/answer interface.
 Shows an embedding mismatch warning when the configured model differs
 from what was used to encode the bundle.
 
@@ -10,6 +10,7 @@ docs/User Experience.md — World Details Screen section.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Callable
 
 import toga
@@ -21,7 +22,7 @@ if TYPE_CHECKING:
 
 
 class WorldDetailsScreen:
-    """Read-only world details with a stub Q&A interface."""
+    """Read-only world details with a Q&A interface backed by agentic RAG."""
 
     def __init__(
         self,
@@ -85,12 +86,12 @@ class WorldDetailsScreen:
         )
         question_row.add(self._question_input)
 
-        ask_btn = toga.Button(
+        self._ask_btn = toga.Button(
             "Ask",
             on_press=self._on_ask,
             style=Pack(padding_left=5),
         )
-        question_row.add(ask_btn)
+        question_row.add(self._ask_btn)
         self._box.add(question_row)
 
         # Read-only answer area
@@ -111,7 +112,29 @@ class WorldDetailsScreen:
         self._box.add(back_btn)
 
     def _on_ask(self, widget) -> None:
-        self._answer_area.value = "TODO"
+        question = self._question_input.value.strip()
+        if not question:
+            self._answer_area.value = "Please enter a question."
+            return
+
+        self._ask_btn.enabled = False
+        self._answer_area.value = "\u2026"
+        asyncio.ensure_future(self._run_ask(question))
+
+    async def _run_ask(self, question: str) -> None:
+        mgr = self._state.zforge_manager
+        if mgr is None:
+            self._answer_area.value = "Error: not initialized."
+            self._ask_btn.enabled = True
+            return
+
+        try:
+            answer = await mgr.ask_about_world(self._slug, question)
+            self._answer_area.value = answer if answer else "No answer generated."
+        except Exception as exc:
+            self._answer_area.value = f"Error: {exc}"
+        finally:
+            self._ask_btn.enabled = True
 
     def _on_back(self, widget) -> None:
         if self._on_done:

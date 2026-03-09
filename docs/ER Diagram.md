@@ -151,6 +151,13 @@ erDiagram
         string zBundleRoot "optional"
         dict zworldKvp "optional"
     }
+    AskAboutWorldProcess {
+        string zBundleRoot
+        dict zworldKvp
+        string userQuestion
+        string answer "optional"
+        list messages
+    }
     DocumentParsingProcess {
         string status "contextualizing, complete"
         string statusMessage "current step description for UI"
@@ -165,6 +172,7 @@ erDiagram
 
     ExperienceGenerationProcess ||--|| ZWorld : "input"
     ExperienceGenerationProcess ||--|| PlayerPreferences : "input"
+    AskAboutWorldProcess ||--|| ZWorld : "input"
 ```
 
 ## Notes
@@ -175,6 +183,7 @@ erDiagram
 - `ModelDownloadService` (`src/zforge/services/model_download_service.py`) streams GGUF files from Hugging Face CDN.
 - `ExperienceGenerationState` (`src/zforge/graphs/state.py`) is the LangGraph TypedDict that drives the multi-agent LLM workflow for experience creation.
 - `CreateWorldState` (`src/zforge/graphs/state.py`) is the LangGraph TypedDict that drives the world creation pipeline.
+- `AskAboutWorldState` (`src/zforge/graphs/state.py`) is the LangGraph TypedDict for the Ask About World agentic RAG process.
 - `DocumentParsingState` (`src/zforge/graphs/state.py`) is the LangGraph TypedDict for the document parsing sub-graph.
 - IF engine abstraction: `IfEngineConnector` (`src/zforge/services/if_engine/if_engine_connector.py`) with ink implementation (`src/zforge/services/if_engine/ink_engine_connector.py`).
 - Embedding abstraction: `EmbeddingConnector` (`src/zforge/services/embedding/embedding_connector.py`) with llama.cpp implementation (`src/zforge/services/embedding/llama_cpp_embedding_connector.py`).
