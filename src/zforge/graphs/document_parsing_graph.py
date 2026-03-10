@@ -20,6 +20,7 @@ import asyncio
 import concurrent.futures
 import logging
 import os
+import re
 from typing import TYPE_CHECKING
 
 from langchain_core.documents import Document
@@ -64,10 +65,179 @@ _LLAMA_EXECUTOR: concurrent.futures.ThreadPoolExecutor = (
     concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="llama")
 )
 
+# Minimum counts of each wiki-markup token required to trigger the wikitext
+# heuristic (non-XML path).  All three must meet or exceed this threshold.
+_WIKITEXT_MIN_MARKER_COUNT = 3
+
+
+# ------------------------------------------------------------------
+# MediaWiki preprocessing helpers
+# ------------------------------------------------------------------
+
+
+def _is_mediawiki_dump(text: str) -> bool:
+    """Return True if *text* appears to be a MediaWiki dump or raw wikitext.
+
+    Two signals are checked:
+
+    1. **XML dump** — the document begins with a ``<mediawiki`` element
+       (standard MediaWiki XML export format).
+    2. **Raw wikitext** — the document contains a high density of the three
+       most distinctive wiki-markup tokens: ``{{`` (template open), ``[[``
+       (wikilink open), and ``==`` (section heading delimiter).  All three
+       must appear at least ``_WIKITEXT_MIN_MARKER_COUNT`` times.
+    """
+    head = text[:2000]
+    if re.search(r"<mediawiki[\s>]", head, re.IGNORECASE):
+        return True
+    counts = [
+        text.count("{{"),
+        text.count("[["),
+        text.count("=="),
+    ]
+    return all(c >= _WIKITEXT_MIN_MARKER_COUNT for c in counts)
+
+
+def _wikitext_to_markdown(wikitext: str) -> str:
+    """Convert a single wikitext string to Markdown using mwparserfromhell.
+
+    * ``== Heading ==`` and deeper levels → ``## Heading`` (Markdown ATX).
+    * ``[[Page|Display]]`` / ``[[Page]]`` wikilinks → display text.
+    * ``[URL Title]`` external links → title text (bare URLs are dropped).
+    * ``{{Template}}`` blocks are stripped entirely.
+    * HTML ``<tag>…</tag>`` content is kept; the tags themselves are dropped.
+    * Plain text nodes are passed through unchanged.
+    """
+    import mwparserfromhell  # lazy import — only needed on the hot path
+
+    wikicode = mwparserfromhell.parse(wikitext)
+    parts: list[str] = []
+    for node in wikicode.nodes:
+        node_type = type(node).__name__
+        if node_type == "Heading":
+            level = node.level
+            title = str(node.title.strip_code()).strip()
+            parts.append(f"\n{'#' * level} {title}\n\n")
+        elif node_type == "Wikilink":
+            display = (
+                str(node.text.strip_code()) if node.text else str(node.title.strip_code())
+            )
+            parts.append(display)
+        elif node_type == "ExternalLink":
+            title = str(node.title.strip_code()) if node.title else ""
+            if title:
+                parts.append(title)
+            # bare URLs without a title are dropped — not useful in a vector store
+        elif node_type == "Template":
+            pass  # drop infoboxes, navboxes, etc.
+        elif node_type == "Tag":
+            # Keep tag content; discard the surrounding HTML markup.
+            contents = str(node.contents.strip_code()) if node.contents else ""
+            parts.append(contents)
+        elif node_type == "Comment":
+            pass  # HTML comments have no retrieval value
+        elif node_type == "Text":
+            parts.append(str(node.value))
+        else:
+            # HTMLEntity and other rarely-occurring node types
+            parts.append(str(node))
+    return "".join(parts)
+
+
+def _mediawiki_to_markdown(text: str) -> str:
+    """Detect format and convert MediaWiki content to Markdown.
+
+    For **XML dumps** (``<mediawiki>`` root element):
+        Each ``<page>`` is extracted and its ``<text>`` child run through
+        :func:`_wikitext_to_markdown`.  Pages are joined with a rule
+        (``---``) so the downstream splitter sees one continuous document.
+
+    For **raw wikitext**:
+        The entire string is passed directly to :func:`_wikitext_to_markdown`.
+    """
+    import xml.etree.ElementTree as ET
+
+    head = text[:2000]
+    if re.search(r"<mediawiki[\s>]", head, re.IGNORECASE):
+        # XML dump — extract page titles and wikitext bodies.
+        try:
+            root = ET.fromstring(text)
+        except ET.ParseError as exc:
+            log.warning(
+                "mediawiki_preprocessor: XML parse failed (%s) — "
+                "falling back to raw wikitext processing",
+                exc,
+            )
+            return _wikitext_to_markdown(text)
+
+        # The namespace varies by dump version; extract it from the root tag.
+        ns_match = re.match(r"\{(.+?)\}", root.tag)
+        ns = {"mw": ns_match.group(1)} if ns_match else {}
+
+        page_texts: list[str] = []
+        for page in root.findall(".//mw:page" if ns else ".//page", ns):
+            title_el = page.find("mw:title" if ns else "title", ns)
+            title = title_el.text.strip() if title_el is not None and title_el.text else ""
+            text_el = page.find(
+                ".//mw:revision/mw:text" if ns else ".//revision/text", ns
+            )
+            if text_el is None or not text_el.text:
+                continue
+            body = _wikitext_to_markdown(text_el.text)
+            page_block = f"# {title}\n\n{body}" if title else body
+            page_texts.append(page_block)
+
+        log.info(
+            "mediawiki_preprocessor: extracted %d page(s) from XML dump",
+            len(page_texts),
+        )
+        return "\n\n---\n\n".join(page_texts)
+
+    # Raw wikitext
+    return _wikitext_to_markdown(text)
+
 
 # ------------------------------------------------------------------
 # Node factories
 # ------------------------------------------------------------------
+
+
+def _make_mediawiki_preprocessor_node():
+    """Return a node that optionally converts MediaWiki markup to Markdown.
+
+    If the incoming ``input_text`` looks like a MediaWiki XML dump or dense
+    raw wikitext, it is converted to clean Markdown before the downstream
+    text-splitter runs.  This substantially reduces noise (template syntax,
+    wikilinks, XML tags) ingested into the vector and graph stores.
+
+    If the text does not appear to be MediaWiki content, the node is a
+    transparent pass-through — ``input_text`` is returned unchanged.
+    """
+
+    @log_node("mediawiki_preprocessor")
+    def mediawiki_preprocessor_node(state: DocumentParsingState) -> dict:
+        raw = state["input_text"]
+        if not _is_mediawiki_dump(raw):
+            log.info(
+                "mediawiki_preprocessor: not detected — passing through %d chars",
+                len(raw),
+            )
+            return {}
+
+        log.info(
+            "mediawiki_preprocessor: MediaWiki detected — converting %d chars",
+            len(raw),
+        )
+        converted = _mediawiki_to_markdown(raw)
+        log.info(
+            "mediawiki_preprocessor: conversion complete — %d → %d chars (%.0f%% reduction)",
+            len(raw),
+            len(converted),
+            (1 - len(converted) / max(len(raw), 1)) * 100,
+        )
+        return {"input_text": converted}
+
+    return mediawiki_preprocessor_node
 
 
 def _make_text_splitter_node(chunk_size: int, chunk_overlap: int):
@@ -546,6 +716,9 @@ def build_document_parsing_graph(
 
     graph = StateGraph(DocumentParsingState)
 
+    graph.add_node(
+        "mediawiki_preprocessor", _make_mediawiki_preprocessor_node()
+    )
     graph.add_node("text_splitter", _make_text_splitter_node(chunk_size, chunk_overlap))
     graph.add_node(
         "contextualizer",
@@ -558,7 +731,8 @@ def build_document_parsing_graph(
     )
     graph.add_node("fan_out", _make_fan_out_node(vector_node_fn, graph_node_fn))
 
-    graph.set_entry_point("text_splitter")
+    graph.set_entry_point("mediawiki_preprocessor")
+    graph.add_edge("mediawiki_preprocessor", "text_splitter")
     graph.add_edge("text_splitter", "contextualizer")
     graph.add_conditional_edges(
         "contextualizer",

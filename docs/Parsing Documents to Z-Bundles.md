@@ -1,7 +1,7 @@
 # Parsing Documents to Z-Bundles
 Z-Forge has a standard [process](Processes.md) for extracting vector and graph data for a [Z-Bundle](RAG%20and%20GRAG%20Implementation.md) from free-text documents via [LLM](LLM%20Abstraction%20Layer.md). The pipeline uses a **two-pass split**: a coarse *context split* divides the document into large chunks for the sequential LLM breadcrumb loop; each contextualized large chunk is then re-split into smaller *retrieval chunks* for vector storage. This keeps the LLM call count proportional to the number of context chunks (not retrieval chunks), allowing precise vector retrieval without a prohibitively long contextualization phase.
 
-Input is always raw UTF-8 plain text.
+Input is raw UTF-8 text. If the text appears to be a MediaWiki dump (XML export) or raw wikitext, a preprocessing step converts it to clean Markdown before splitting, removing template noise and XML markup that would otherwise pollute the vector and graph stores.
 
 This is a general pipeline. [World Generation](World%20Generation.md) is one specific instance of it; once this general spec is stable, the World Generation spec will reference it explicitly.
 
@@ -26,6 +26,7 @@ flowchart TD
     end
 
     subgraph Tools
+        T_mwpfh["mwparserfromhell"]
         T_ctx_splitter["RecursiveCharacterTextSplitter\n(context pass)"]
         T_ret_splitter["RecursiveCharacterTextSplitter\n(retrieval pass)"]
         T_lancedb[LanceDB.from_documents] --> R_vector
@@ -34,7 +35,8 @@ flowchart TD
     end
 
     subgraph Process
-        P_start(( )) --> P_splitter["Text Splitter\ncontext pass"]
+        P_start(( )) --> P_preproc["MediaWiki Preprocessor\n(detect + convert)"]
+        P_preproc --> P_splitter["Text Splitter\ncontext pass"]
         P_splitter --> P_contextualizer["Contextualizer\n+ retrieval re-split"]
         P_contextualizer -->|next chunk| P_contextualizer
         P_contextualizer --> P_vector_ingest[Vector Ingestion]
@@ -43,6 +45,8 @@ flowchart TD
         P_graph_ingest --> P_stop
     end
 
+    P_preproc <-.-> T_mwpfh
+    P_preproc <-.-> S_input_text
     P_splitter <-.-> S_input_text
     P_splitter <-.-> S_chunks
     P_splitter <-.-> T_ctx_splitter
@@ -60,14 +64,51 @@ flowchart TD
 ```
 
 ## Architectural Overview
-A two-phase ETL process that transforms a plain-text document into a dual-layered storage system:
+A three-phase ETL process that transforms a text document into a dual-layered storage system:
 
 - **Vector Layer:** LanceDB (Semantic/Sensory Retrieval)
 - **Graph Layer:** KuzuDB (Structural/Relational Retrieval)
 
 Storage paths for both layers follow the Z-Bundle layout defined in [RAG and GRAG Implementation](RAG%20and%20GRAG%20Implementation.md#implementation).
 
-## Phase 1: Sequential Contextualization
+## Phase 0: Preprocessing (MediaWiki Detection)
+
+**Goal:** Detect whether `input_text` is a MediaWiki XML dump or dense raw wikitext, and if so, convert it to clean Markdown before the downstream splitter runs.  This strips template noise, XML tags, and wikilink syntax that would otherwise inflate chunk counts and pollute LLM context.
+
+### Detection Heuristics
+
+Two signals are checked, in order:
+
+1. **XML dump** — the document's first 2,000 characters contain a `<mediawiki` element.  This is the unambiguous signal emitted by the MediaWiki XML export tool.
+2. **Raw wikitext** — all three of the most distinctive wiki-markup tokens (`{{`, `[[`, `==`) appear at least 3 times each.  Documents with this density are almost certainly wikitext.
+
+If neither signal fires, the node is a transparent pass-through and `input_text` is unchanged.
+
+### Conversion Rules (mwparserfromhell)
+
+The conversion iterates the `mwparserfromhell` node tree for each wikitext string:
+
+| Node type | Output |
+|---|---|
+| `Heading` (`== … ==`) | ATX Markdown heading (`## …`) at the corresponding depth |
+| `Wikilink` (`[[Page\|Display]]`) | Display text if present, otherwise page title |
+| `ExternalLink` (`[URL Title]`) | Title text; bare URLs without a title are dropped |
+| `Template` (`{{ … }}`) | Stripped entirely |
+| `Tag` (HTML `<tag>…</tag>`) | Inner content only; surrounding tags dropped |
+| `Comment` | Dropped |
+| `Text` | Passed through unchanged |
+
+For **XML dumps**, each `<page>/<revision>/<text>` element is extracted and processed individually, then joined with `---` separators so the downstream splitter sees one continuous text.  Page titles become top-level `#` headings.
+
+### Implementation
+
+- **Library:** `mwparserfromhell` (imported lazily inside the node, only on the hot path)
+- **Node name:** `mediawiki_preprocessor` (synchronous; no LLM calls)
+- **Helpers:** `_is_mediawiki_dump(text)`, `_wikitext_to_markdown(wikitext)`, `_mediawiki_to_markdown(text)` in `document_parsing_graph.py`
+- **Detection threshold constant:** `_WIKITEXT_MIN_MARKER_COUNT = 3`
+- The node returns `{}` (no state change) when the input is not identified as MediaWiki content.
+
+
 
 **Goal:** Process raw text into `Document` objects containing a "Rolling Context" breadcrumb to preserve narrative continuity across chunks.
 

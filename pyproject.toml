@@ -26,6 +26,7 @@ dependencies = [
     "lancedb>=0.3",
     "kuzu>=0.4",
     "llama-cpp-python>=0.2",
+    "mwparserfromhell>=0.6",
 ]
 
 [project.optional-dependencies]
@@ -67,6 +68,7 @@ requires = [
     "lancedb>=0.3",
     "kuzu>=0.4",
     "llama-cpp-python>=0.2",
+    "mwparserfromhell>=0.6",
 ]
 
 [tool.setuptools.packages.find]
