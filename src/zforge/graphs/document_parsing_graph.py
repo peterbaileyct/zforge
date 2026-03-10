@@ -390,13 +390,17 @@ def _make_vector_ingestion_node(embedding_connector):
 
         import lancedb
 
-        documents = state["documents"]
+        # Use the small retrieval sub-chunks for vector search precision.
+        # The large contextualizer documents (state["documents"]) are only
+        # used for graph ingestion — they are too large to embed meaningfully
+        # and produce retrieval results that are too big for the LLM context.
+        documents = state["retrieval_documents"]
         z_bundle_root = state["z_bundle_root"]
         vector_path = f"{z_bundle_root}/vector"
         os.makedirs(vector_path, exist_ok=True)
 
         log.info(
-            "vector_ingestion_node: writing %d documents to %s",
+            "vector_ingestion_node: writing %d retrieval documents to %s",
             len(documents),
             vector_path,
         )

@@ -16,6 +16,10 @@ from typing import Any, Callable
 
 log = logging.getLogger(__name__)
 
+# Cache open KuzuGraph connections keyed by graph_path to avoid re-opening the
+# database on every retrieve_graph tool call.
+_KUZU_GRAPH_CACHE: dict[str, Any] = {}
+
 
 def log_node(name: str) -> Callable:
     """Decorator factory that wraps a LangGraph node function with structured logging.
@@ -211,8 +215,10 @@ def make_retrieve_graph_tool(z_bundle_root: str):
         from langchain_community.graphs import KuzuGraph
 
         graph_path = f"{z_bundle_root}/propertygraph"
-        db = kuzu.Database(graph_path)
-        graph = KuzuGraph(db, allow_dangerous_requests=True)
+        if graph_path not in _KUZU_GRAPH_CACHE:
+            db = kuzu.Database(graph_path)
+            _KUZU_GRAPH_CACHE[graph_path] = KuzuGraph(db, allow_dangerous_requests=True)
+        graph = _KUZU_GRAPH_CACHE[graph_path]
 
         q = query.strip()
         first_word = q.split()[0].upper() if q.split() else ""
@@ -243,39 +249,55 @@ def make_retrieve_graph_tool(z_bundle_root: str):
         if not hits:
             return f"No entities found matching '{q}'.\n\nSchema for reference:\n{graph.get_schema}"
 
-        parts: list[str] = []
+        # Group hits by label so we can batch outgoing/incoming edge queries
+        # per label (2 queries per unique label) rather than per node (2 per node).
+        from collections import defaultdict
+        hits_by_label: dict[str, list[str]] = defaultdict(list)
         for label, node_id in hits[:10]:
-            lines = [f"[{label}] {node_id}"]
-            # Outgoing edges
-            try:
-                for row in graph.query(
-                    f"MATCH (n:{label})-[r]->(m) WHERE n.id = $id "
-                    f"RETURN type(r) AS rel, label(m) AS m_label, m.id AS target LIMIT 20",
-                    params={"id": node_id},
-                ):
-                    if row.get("m_label") == "Chunk":
-                        continue
-                    lines.append(
-                        f"  -[{row.get('rel')}]-> [{row.get('m_label')}] {row.get('target')}"
-                    )
-            except Exception:
-                pass
-            # Incoming edges
-            try:
-                for row in graph.query(
-                    f"MATCH (m)-[r]->(n:{label}) WHERE n.id = $id "
-                    f"RETURN type(r) AS rel, label(m) AS m_label, m.id AS source LIMIT 20",
-                    params={"id": node_id},
-                ):
-                    if row.get("m_label") == "Chunk":
-                        continue
-                    lines.append(
-                        f"  <-[{row.get('rel')}]- [{row.get('m_label')}] {row.get('source')}"
-                    )
-            except Exception:
-                pass
-            parts.append("\n".join(lines))
+            hits_by_label[label].append(node_id)
 
+        hit_lines: dict[tuple[str, str], list[str]] = {
+            (lbl, nid): [f"[{lbl}] {nid}"]
+            for lbl, nid in hits[:10]
+        }
+
+        for label, node_ids in hits_by_label.items():
+            # Outgoing edges — one query for all matched nodes of this label
+            try:
+                for row in graph.query(
+                    f"MATCH (n:{label})-[r]->(m) WHERE n.id IN $ids "
+                    f"RETURN n.id AS src, type(r) AS rel, label(m) AS m_label, m.id AS target LIMIT 200",
+                    params={"ids": node_ids},
+                ):
+                    if row.get("m_label") == "Chunk":
+                        continue
+                    key = (label, row.get("src"))
+                    if key in hit_lines:
+                        hit_lines[key].append(
+                            f"  -[{row.get('rel')}]-> [{row.get('m_label')}] {row.get('target')}"
+                        )
+            except Exception:
+                pass
+            # Incoming edges — one query for all matched nodes of this label
+            try:
+                for row in graph.query(
+                    f"MATCH (m)-[r]->(n:{label}) WHERE n.id IN $ids "
+                    f"RETURN n.id AS tgt, type(r) AS rel, label(m) AS m_label, m.id AS source LIMIT 200",
+                    params={"ids": node_ids},
+                ):
+                    if row.get("m_label") == "Chunk":
+                        continue
+                    key = (label, row.get("tgt"))
+                    if key in hit_lines:
+                        hit_lines[key].append(
+                            f"  <-[{row.get('rel')}]- [{row.get('m_label')}] {row.get('source')}"
+                        )
+            except Exception:
+                pass
+
+        parts: list[str] = [
+            "\n".join(hit_lines[(lbl, nid)]) for lbl, nid in hits[:10]
+        ]
         return "\n\n".join(parts)
 
     return retrieve_graph

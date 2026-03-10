@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
@@ -84,11 +85,21 @@ def _make_librarian_node(
             table = await db.open_table("chunks")
             results_arrow = await (
                 await table.search(query_vec, query_type="vector")
-            ).limit(5).to_arrow()
+            ).limit(10).to_arrow()
             texts = results_arrow.column("text").to_pylist()
+            metadatas = results_arrow.column("metadata").to_pylist()
             if not texts:
                 return "No results found."
-            return "\n\n---\n\n".join(t for t in texts if t)
+            parts = []
+            for text, meta in zip(texts, metadatas):
+                if not text:
+                    continue
+                breadcrumb = (meta or {}).get("breadcrumb", "")
+                if breadcrumb:
+                    parts.append(f"[Context: {breadcrumb}]\n\n{text}")
+                else:
+                    parts.append(text)
+            return "\n\n---\n\n".join(parts)
 
         retrieve_graph = make_retrieve_graph_tool(z_bundle_root)
 
@@ -127,11 +138,14 @@ def _make_librarian_node(
             for tc in response.tool_calls:
                 tool_fn = tool_map.get(tc["name"])
                 if tool_fn:
+                    _t0 = time.perf_counter()
                     result = await tool_fn.ainvoke(tc["args"])
+                    _elapsed = time.perf_counter() - _t0
                     log.info(
-                        "librarian_node: tool %s returned %d chars",
+                        "librarian_node: tool %s returned %d chars in %.2fs",
                         tc["name"],
                         len(str(result)),
+                        _elapsed,
                     )
                     messages.append(
                         ToolMessage(
