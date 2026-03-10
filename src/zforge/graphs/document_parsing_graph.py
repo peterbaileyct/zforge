@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import os
 from typing import TYPE_CHECKING
 
 from langchain_core.documents import Document
@@ -45,6 +46,14 @@ _CONTEXTUALIZER_PROMPT_TEMPLATE = (
 
 # Default concurrency limit for the fan-out semaphore.
 _FAN_OUT_CONCURRENCY = 5
+
+# Number of Document objects sent to LLMGraphTransformer per batch.
+# LLMGraphTransformer.aconvert_to_graph_documents dispatches one LLM call per
+# document concurrently. With thousands of chunks this causes immediate rate-
+# limit exhaustion. Batching keeps concurrent calls to a manageable level;
+# batches are processed sequentially. See docs/Parsing Documents to
+# Z-Bundles.md § Graph extraction batch size.
+_GRAPH_EXTRACTION_BATCH_SIZE = 10
 
 # Single-thread executor for all llama.cpp / local-model work.
 # llama.cpp's Metal (GPU) backend on macOS binds its command queue to the OS
@@ -79,6 +88,7 @@ def _make_text_splitter_node(chunk_size: int, chunk_overlap: int):
         return {
             "chunks": chunks,
             "documents": [],
+            "retrieval_documents": [],
             "current_chunk_index": 0,
             "status": "contextualizing",
             "status_message": f"Split text into {len(chunks)} chunk(s)",
@@ -88,11 +98,24 @@ def _make_text_splitter_node(chunk_size: int, chunk_overlap: int):
 
 
 def _make_contextualizer_node(
-    llm_connector: LlmConnector, model_name: str | None = None
+    llm_connector: LlmConnector,
+    model_name: str | None = None,
+    retrieval_chunk_size: int = 500,
+    retrieval_chunk_overlap: int = 50,
 ):
-    """Return a node that contextualizes the current chunk."""
+    """Return a node that contextualizes the current chunk.
+
+    Each large context chunk is summarized to produce a breadcrumb for the
+    next chunk.  The chunk is then re-split by ``_retrieval_splitter`` into
+    smaller sub-chunks for vector-store precision; each sub-chunk inherits
+    the current rolling breadcrumb so no additional LLM calls are needed.
+    """
 
     _model_cache: list = []
+    _retrieval_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=retrieval_chunk_size,
+        chunk_overlap=retrieval_chunk_overlap,
+    )
 
     @log_node("contextualizer")
     async def contextualizer_node(state: DocumentParsingState) -> dict:
@@ -127,10 +150,29 @@ def _make_contextualizer_node(
             len(chunks),
             len(chunk),
         )
-        response = await model.ainvoke(
-            [SystemMessage(content=system), HumanMessage(content=human_content)]
-        )
-        summary = str(getattr(response, "content", ""))
+        try:
+            response = await model.ainvoke(
+                [SystemMessage(content=system), HumanMessage(content=human_content)]
+            )
+            summary = str(getattr(response, "content", ""))
+        except Exception as exc:
+            # Log the actual provider error body when available (e.g. Groq 400).
+            _detail = ""
+            _response = getattr(exc, "response", None)
+            if _response is not None:
+                try:
+                    _detail = f" — {_response.json()}"
+                except Exception:
+                    _detail = f" — {getattr(_response, 'text', '')}"
+            log.warning(
+                "contextualizer_node: chunk %d/%d LLM call failed (%s%s) "
+                "— continuing with empty breadcrumb",
+                idx + 1,
+                len(chunks),
+                exc,
+                _detail,
+            )
+            summary = ""
 
         # Create a Document with the chunk text and breadcrumb metadata
         doc = Document(
@@ -139,8 +181,28 @@ def _make_contextualizer_node(
         )
         documents.append(doc)
 
+        # Re-split this context chunk into smaller retrieval chunks for the
+        # vector store (two-pass split).  Each sub-chunk inherits the *same*
+        # breadcrumb as its parent — context from before this section — so all
+        # retrieval chunks carry meaningful rolling context without extra LLM
+        # calls.  Graph ingestion continues to use the full context-pass
+        # documents (``state["documents"]``) for richer extraction.
+        retrieval_documents = list(state.get("retrieval_documents") or [])
+        if retrieval_chunk_size < len(chunk):
+            sub_chunks = _retrieval_splitter.split_text(chunk)
+        else:
+            sub_chunks = [chunk]
+        for sub_chunk in sub_chunks:
+            retrieval_documents.append(
+                Document(
+                    page_content=sub_chunk,
+                    metadata={"breadcrumb": breadcrumb},
+                )
+            )
+
         return {
             "documents": documents,
+            "retrieval_documents": retrieval_documents,
             "current_chunk_index": 1,  # operator.add increments
             "status": "contextualizing",
             "status_message": f"Contextualized chunk {idx + 1}/{len(chunks)}",
@@ -161,6 +223,7 @@ def _make_vector_ingestion_node(embedding_connector):
         documents = state["documents"]
         z_bundle_root = state["z_bundle_root"]
         vector_path = f"{z_bundle_root}/vector"
+        os.makedirs(vector_path, exist_ok=True)
 
         log.info(
             "vector_ingestion_node: writing %d documents to %s",
@@ -171,14 +234,42 @@ def _make_vector_ingestion_node(embedding_connector):
         texts = [doc.page_content for doc in documents]
         metadatas = [doc.metadata for doc in documents]
 
+        # Truncate text sent to the embedding model to avoid llama_decode overflow.
+        # At 3 chars/token a 512-token context clamps to ~1536 chars (~384 tokens),
+        # well under any realistic n_ctx. The full chunk text is stored in LanceDB.
+        # See docs/Parsing Documents to Z-Bundles.md § Embedding context overflow.
+        _CHARS_PER_TOKEN = 3
+        embed_max_chars = embedding_connector.get_context_size() * _CHARS_PER_TOKEN
+        texts_for_embed = [t[:embed_max_chars] for t in texts]
+
         # Compute embeddings on the dedicated llama thread so the event loop
         # stays free and Metal always runs on the same OS thread.
+        # IMPORTANT: call embed_query() one text at a time rather than passing
+        # the full list to embed_documents(). LlamaCppEmbeddings.embed_documents
+        # forwards the entire list to llama_cpp.create_embedding() as a batch;
+        # llama.cpp then tries to decode all texts in a single decode pass, which
+        # overflows n_ctx even for short chunks and raises llama_decode returned -1.
+        # embed_query() processes one text per llama_decode call, staying within
+        # the context window. See docs/Parsing Documents to Z-Bundles.md
+        # § embed_documents batch overflow pitfall.
         loop = asyncio.get_running_loop()
         embedder = embedding_connector.get_embeddings()
-        vectors = await loop.run_in_executor(
-            _LLAMA_EXECUTOR,
-            lambda: embedder.embed_documents(texts),
-        )
+
+        def _embed_one_by_one(embed_texts: list[str]) -> list:
+            return [embedder.embed_query(t) for t in embed_texts]
+
+        try:
+            vectors = await loop.run_in_executor(
+                _LLAMA_EXECUTOR,
+                lambda: _embed_one_by_one(texts_for_embed),
+            )
+        except Exception as exc:
+            log.warning(
+                "vector_ingestion_node: embedding failed (%s) — "
+                "vector store will be empty for this document",
+                exc,
+            )
+            return {"status_message": "Vector store skipped (embedding error)"}
 
         # Build rows in the schema LanceDBVectorStore expects.
         rows = [
@@ -228,6 +319,9 @@ def _make_graph_ingestion_node(
         allowed_nodes = state.get("allowed_nodes", [])
         allowed_relationships = state.get("allowed_relationships", [])
         graph_path = f"{z_bundle_root}/propertygraph"
+        # KuzuDB creates its own database file — do NOT pre-create this path
+        # as a directory, or kuzu.Database() will raise "path cannot be a
+        # directory". See docs/Parsing Documents to Z-Bundles.md.
 
         log.info(
             "graph_ingestion_node: extracting graph from %d documents",
@@ -239,7 +333,53 @@ def _make_graph_ingestion_node(
             allowed_nodes=allowed_nodes,
             allowed_relationships=allowed_relationships,
         )
-        graph_documents = await transformer.aconvert_to_graph_documents(documents)
+
+        # Process documents in sequential batches to avoid issuing thousands of
+        # concurrent LLM calls (one per document) which exhausts provider rate
+        # limits. Each batch is awaited before the next starts.
+        graph_documents: list = []
+        batches = [
+            documents[i : i + _GRAPH_EXTRACTION_BATCH_SIZE]
+            for i in range(0, len(documents), _GRAPH_EXTRACTION_BATCH_SIZE)
+        ]
+        log.info(
+            "graph_ingestion_node: %d document(s) in %d batch(es) of ≤%d",
+            len(documents),
+            len(batches),
+            _GRAPH_EXTRACTION_BATCH_SIZE,
+        )
+        for batch_idx, batch in enumerate(batches):
+            try:
+                batch_docs = await transformer.aconvert_to_graph_documents(batch)
+                graph_documents.extend(batch_docs)
+                log.info(
+                    "graph_ingestion_node: batch %d/%d — extracted %d graph doc(s)",
+                    batch_idx + 1,
+                    len(batches),
+                    len(batch_docs),
+                )
+            except BaseException as exc:
+                # Catch BaseException (not just Exception) to handle ExceptionGroup
+                # raised by asyncio.TaskGroup on Python 3.11+ when one concurrent
+                # document call fails (e.g. Groq/Gemini 400). Log the actual
+                # provider error body when available and skip the batch.
+                _detail = ""
+                _causes = getattr(exc, "exceptions", [exc])  # unwrap ExceptionGroup
+                for _cause in _causes:
+                    _response = getattr(_cause, "response", None)
+                    if _response is not None:
+                        try:
+                            _detail = f" — {_response.json()}"
+                        except Exception:
+                            _detail = f" — {getattr(_response, 'text', '')}"
+                        break
+                log.warning(
+                    "graph_ingestion_node: batch %d/%d raised %s%s — skipping batch",
+                    batch_idx + 1,
+                    len(batches),
+                    exc,
+                    _detail,
+                )
 
         log.info(
             "graph_ingestion_node: extracted %d graph documents",
@@ -389,12 +529,15 @@ def build_document_parsing_graph(
     embedding_connector:
         Embedding connector for LanceDB vector ingestion.
     config:
-        ZForgeConfig providing parsing_chunk_size and parsing_chunk_overlap.
+        ZForgeConfig providing parsing_chunk_size, parsing_chunk_overlap,
+        parsing_retrieval_chunk_size, and parsing_retrieval_chunk_overlap.
     contextualizer_model / graph_extractor_model:
         Optional model name overrides.
     """
     chunk_size = getattr(config, "parsing_chunk_size", 10000)
     chunk_overlap = getattr(config, "parsing_chunk_overlap", 500)
+    retrieval_chunk_size = getattr(config, "parsing_retrieval_chunk_size", 500)
+    retrieval_chunk_overlap = getattr(config, "parsing_retrieval_chunk_overlap", 50)
 
     vector_node_fn = _make_vector_ingestion_node(embedding_connector)
     graph_node_fn = _make_graph_ingestion_node(
@@ -406,7 +549,12 @@ def build_document_parsing_graph(
     graph.add_node("text_splitter", _make_text_splitter_node(chunk_size, chunk_overlap))
     graph.add_node(
         "contextualizer",
-        _make_contextualizer_node(contextualizer_connector, contextualizer_model),
+        _make_contextualizer_node(
+            contextualizer_connector,
+            contextualizer_model,
+            retrieval_chunk_size=retrieval_chunk_size,
+            retrieval_chunk_overlap=retrieval_chunk_overlap,
+        ),
     )
     graph.add_node("fan_out", _make_fan_out_node(vector_node_fn, graph_node_fn))
 

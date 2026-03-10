@@ -27,6 +27,7 @@ from zforge.services.if_engine.ink_engine_connector import InkEngineConnector
 from zforge.services.llm.anthropic_connector import AnthropicConnector
 from zforge.services.llm.connector_registry import ConnectorRegistry
 from zforge.services.llm.google_connector import GoogleConnector
+from zforge.services.llm.groq_connector import GroqConnector
 from zforge.services.llm.llama_cpp_connector import LlamaCppConnector
 from zforge.services.llm.openai_connector import OpenAiConnector
 
@@ -72,6 +73,10 @@ class ZForgeApp(toga.App):
         anthropic_connector = AnthropicConnector()
         anthropic_connector.load_from_keyring()
         registry.register(anthropic_connector)
+
+        groq_connector = GroqConnector()
+        groq_connector.load_from_keyring()
+        registry.register(groq_connector)
 
         # OpenAI is the default provider for world generation
         registry.set_default("OpenAI")

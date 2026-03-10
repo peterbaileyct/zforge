@@ -17,7 +17,7 @@ Vector stores are recorded in a LanceDB database in "{root}/vector/". The LanceD
 - `entity_type`: string label (e.g., `"character"`, `"location"`)
 - `text`: the serialized natural-language chunk text
 
-Property graphs are recorded in a KùzuDB database in `{root}/propertygraph`. The schema is managed entirely by `KuzuGraph.add_graph_documents` (from `langchain_community.graphs`), which creates:
+Property graphs are recorded in a KùzuDB database file at `{root}/propertygraph`. The schema is managed entirely by `KuzuGraph.add_graph_documents` (from `langchain_community.graphs`), which creates:
 - **Per-type node tables** — one node table per entity type in `allowed_nodes` (e.g., `Character`, `Location`, `Event`, `Faction`). Node properties include at minimum `id` and `text`.
 - **Per-type-pair relationship tables** — one rel table per (source-type, relationship-type, target-type) triple encountered in the extracted data. The relationship type is encoded in the table name rather than stored as a column.
 - **`Chunk` node table** (when `include_source=True`) — one node per source text chunk, with edges from every extracted entity node back to the chunk it was extracted from, enabling hybrid lookup: given any entity, retrieve the original passage.

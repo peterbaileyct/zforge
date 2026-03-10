@@ -26,6 +26,15 @@ class EmbeddingConnector(ABC):
         """Return a LangChain Embeddings instance for the configured model."""
 
     @abstractmethod
+    def get_context_size(self) -> int:
+        """Return the maximum number of tokens the embedding model can process.
+
+        Callers should truncate input text to roughly ``get_context_size() * 4``
+        characters (≈4 chars per token for English prose) before embedding to
+        prevent llama_decode / tokeniser overflow errors.
+        """
+
+    @abstractmethod
     def model_identity(self) -> dict:
         """Return embedding model metadata for Z-Bundle KVP storage.
 

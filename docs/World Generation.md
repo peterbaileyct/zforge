@@ -9,8 +9,11 @@ flowchart TD
 
     subgraph State
         S_input_text[/"input_text"/]
+        S_world_uuid[/"world_uuid"/]
         S_z_bundle_root[/"z_bundle_root"/]
         S_zworld_kvp[/"zworld_kvp"/]
+        S_conflicting_slug[/"conflicting_slug"/]
+        S_overwrite_decision[/"overwrite_decision"/]
         S_status[/"status"/]
         S_failure_reason[/"failure_reason"/]
     end
@@ -29,16 +32,24 @@ flowchart TD
         P_start(( )) --> P_doc_parsing["Document Parsing\nsub-process"]
         P_doc_parsing --> P_summarizer[Summarizer]
         P_summarizer -->|"retrieves: Z-Bundle"| P_summarizer
-        P_summarizer --> P_finalizer[Finalizer]
+        P_summarizer --> P_dup_check[Duplicate Check]
+        P_dup_check -->|"no conflict\nor overwrite"| P_finalizer[Finalizer]
+        P_dup_check -->|"awaiting confirmation"| P_stop_await((await))
+        P_stop_await -->|"user decision"| P_dup_check
         P_finalizer --> P_stop(( ))
     end
 
     P_doc_parsing <-.-> S_input_text
+    P_doc_parsing <-.-> S_world_uuid
     P_doc_parsing <-.-> S_z_bundle_root
     P_summarizer <-.-> A_summarizer
     P_summarizer <-.-> S_z_bundle_root
     P_summarizer <-.-> S_zworld_kvp
+    P_dup_check <-.-> S_zworld_kvp
+    P_dup_check <-.-> S_conflicting_slug
+    P_dup_check <-.-> S_overwrite_decision
     P_finalizer <-.-> S_zworld_kvp
+    P_finalizer <-.-> S_world_uuid
     T_vec_retriever <-.-> P_summarizer
     T_graph_retriever <-.-> P_summarizer
 ```
@@ -89,13 +100,23 @@ The LLM freely invokes these tools as needed before producing its final JSON out
 }
 ```
 
-### Step 3: Finalisation (non-LLM)
+### Step 3: Duplicate Check (non-LLM)
 
-A deterministic post-processing step takes the Summarizer's JSON output and:
+Before writing any output, the pipeline checks whether an existing world shares the same title as the newly summarised world. The check normalises both titles to kebab-case slugs and compares them; if a match is found and no user decision is recorded in the state yet (`overwrite_decision is None`), the graph sets `status = "awaiting_confirmation"` and exits.
+
+`ZForgeManager.start_world_creation` senses the `awaiting_confirmation` status, invokes its `on_confirm_duplicate` async callback (provided by the UI), and re-invokes the graph with `overwrite_decision = "overwrite"` or `"cancel"`. Because `z_bundle_root` and `zworld_kvp` are already set in the resumed state, the document-parsing and summariser nodes early-exit without repeating their expensive work.
+
+If the decision is `"cancel"`, the pipeline completes with `status = "cancelled"` and the in-progress bundle is left in `worlds-in-progress/` for eventual clean-up. If the decision is `"overwrite"`, the existing world is deleted before the final move (see Step 4).
+
+### Step 4: Finalisation (non-LLM)
+
+A deterministic post-processing step takes the Summariser's JSON output and:
 1. Constructs a `ZWorld` object populated with `title`, `summary`, `setting_era`, `source_canon`, and `content_advisories`.
 2. Derives the `slug` by converting the title to kebab-case (e.g. `"The Dragonet Prophecy"` → `"the-dragonet-prophecy"`).
-3. Generates a fresh UUID for the world.
-4. Writes all KVP fields (`title`, `summary`, `setting_era`, `source_canon`, `content_advisories`, `slug`, `uuid`) to the Z-Bundle KVP store (`kvp.json`).
+3. Uses the UUID that was assigned at graph entry (stored in `world_uuid` state field) — no new UUID is generated here.
+4. If `overwrite_decision == "overwrite"`, deletes the existing world bundle at `worlds/{conflicting_slug}/` before moving.
+5. **Moves the in-progress Z-Bundle** from `worlds-in-progress/{uuid}/` to `worlds/{slug}/` (see [In-progress Z-Bundle path](#in-progress-z-bundle-path)).
+6. Writes all KVP fields (`title`, `summary`, `setting_era`, `source_canon`, `content_advisories`, `slug`, `uuid`) to the Z-Bundle KVP store (`kvp.json`).
 
 ## Implementation
 
@@ -124,12 +145,26 @@ Most parsing implementation details are covered in the [Document Parsing](Parsin
   ```python
   class CreateWorldState(TypedDict):
       input_text: str               # Raw source text (input)
-      z_bundle_root: str | None     # Bundle path; set by the document-parsing sub-graph
+      world_uuid: str | None        # Assigned at graph entry; stable across resume
+      z_bundle_root: str | None     # worlds-in-progress/{uuid}/ until finalised
       zworld_kvp: dict | None       # Summarizer JSON output; set by the summarizer node
-      status: str                   # e.g. "parsing", "summarizing", "complete", "failed"
+      conflicting_slug: str | None  # Set by duplicate_check if same-title world exists
+      overwrite_decision: str | None  # "overwrite" | "cancel" | None
+      status: str                   # e.g. "parsing", "summarizing", "awaiting_confirmation", "complete", "cancelled", "failed"
       status_message: str
       failure_reason: str | None
       messages: Annotated[list, add_messages]
   ```
 
 - **Async nodes required:** `document_parsing_node` and `summarizer_node` must be `async def` and use `await parsing_graph.ainvoke(...)` / `await bound_model.ainvoke(...)`. See the [Document Parsing async pitfall note](Parsing%20Documents%20to%20Z-Bundles.md#async-nodes-required--afc-deadlock-pitfall) for the full explanation — the same AFC deadlock applies here.
+
+### In-progress Z-Bundle path
+
+**Why it exists:** The canonical slug is derived from the LLM-generated title (Step 2), but the vector store and property graph must be written during Step 1 — before the title is known. This is resolved by writing to a stable, UUID-keyed holding directory and moving to the final location only at the very end.
+
+**How it works:**
+1. At entry to the `document_parsing_node`, a UUID is generated (`world_uuid = str(uuid.uuid4())`) and stored in `CreateWorldState.world_uuid`. The full Z-Bundle path (`<bundles_root>/worlds-in-progress/<uuid>/`) is stored in `CreateWorldState.z_bundle_root`.
+2. All document-parsing writes (LanceDB vector store, KuzuDB property graph) target this in-progress path.
+3. In the Finaliser, once the canonical slug has been derived from the title, `os.rename(<in_progress_path>, <final_path>)` moves the bundle to `<bundles_root>/world/<slug>/`. `z_bundle_root` in state is updated to the final path before `ZWorldManager.create()` is invoked.
+
+**Resume on duplicate confirmation:** When the graph is re-invoked after a duplicate confirmation, `z_bundle_root` is already set in the initial state. The `document_parsing_node` detects this and skips immediately; the summariser does the same when `zworld_kvp` is already set. This avoids reprocessing the document for the second graph invocation.

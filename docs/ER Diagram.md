@@ -70,7 +70,7 @@ Z-Worlds are persisted as Z-Bundles at `bundles/world/{slug}/`:
 - `kvp.json` — key-value metadata (title, slug, UUID, summary, setting_era, source_canon, content_advisories, embedding model identity)
 - `source.txt` — original raw input text
 - `vector/` — LanceDB vector store (document chunk embeddings; table name `chunks`)
-- `propertygraph/` — KùzuDB property graph (schema-less entity nodes and relationship edges, managed by `KuzuGraph.add_graph_documents`)
+- `propertygraph` — KùzuDB property graph file (schema-less entity nodes and relationship edges, managed by `KuzuGraph.add_graph_documents`)
 
 Entity types (Character, Location, Event, Faction, Artifact, Era, Culture, Deity, Prophecy, Concept, Mechanic, Trope, Species, Occupation) are no longer Python dataclasses — they exist as schema-less nodes in KuzuDB, created dynamically by `LLMGraphTransformer`.
 
@@ -92,7 +92,7 @@ erDiagram
         string table_name "chunks"
     }
     PropertyGraph {
-        string path "propertygraph/"
+        string path "propertygraph"
         string backend "KuzuDB"
     }
 

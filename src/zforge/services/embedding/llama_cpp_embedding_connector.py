@@ -33,6 +33,7 @@ class LlamaCppEmbeddingConnector(EmbeddingConnector):
         self._context_size = context_size
         self._gpu_layers = gpu_layers
         self._resolved_path: Path | None = None
+        self._embeddings: Embeddings | None = None
 
     def _resolve_path(self) -> Path:
         """Resolve the model path relative to sandboxed storage."""
@@ -58,17 +59,32 @@ class LlamaCppEmbeddingConnector(EmbeddingConnector):
             log.warning("Embedding model not found at %s", path)
         return exists
 
+    def get_context_size(self) -> int:
+        """Return the configured context window size in tokens."""
+        return self._context_size
+
     def get_embeddings(self) -> Embeddings:
-        """Return a LangChain LlamaCppEmbeddings instance."""
+        """Return a cached LangChain LlamaCppEmbeddings instance.
+
+        The instance is created on the first call and reused thereafter.
+        Constructing a new LlamaCppEmbeddings on every call causes repeated
+        model load/unload cycles that exhaust llama.cpp's Metal command queue
+        on macOS and produce ``llama_decode returned -1`` errors.
+        See docs/Parsing Documents to Z-Bundles.md § Embedding repeated
+        model construction pitfall.
+        """
+        if self._embeddings is not None:
+            return self._embeddings
         from langchain_community.embeddings import LlamaCppEmbeddings
 
         path = self._resolve_path()
-        return LlamaCppEmbeddings(
+        self._embeddings = LlamaCppEmbeddings(
             model_path=str(path),
             n_ctx=self._context_size,
             n_gpu_layers=self._gpu_layers,
             verbose=False,
         )
+        return self._embeddings
 
     def model_identity(self) -> dict:
         """Return model basename and file size for KVP storage."""

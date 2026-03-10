@@ -67,7 +67,8 @@ class DocumentParsingState(TypedDict):
     allowed_nodes: list[str]
     allowed_relationships: list[str]
     chunks: list[str]
-    documents: list
+    documents: list           # contextualized large-chunk Documents (used for graph ingestion)
+    retrieval_documents: list  # small re-split Documents with breadcrumbs (used for vector ingestion)
     current_chunk_index: Annotated[int, operator.add]
     status: str
     status_message: str
@@ -80,8 +81,11 @@ class CreateWorldState(TypedDict):
     """
 
     input_text: str
-    z_bundle_root: str | None
+    world_uuid: str | None          # Pre-assigned at graph entry; stable across resume
+    z_bundle_root: str | None       # worlds-in-progress/{uuid}/ until finalised
     zworld_kvp: dict | None
+    conflicting_slug: str | None    # Set by duplicate_check if a same-title world exists
+    overwrite_decision: str | None  # "overwrite" | "cancel" | None
     status: str
     status_message: str
     failure_reason: str | None

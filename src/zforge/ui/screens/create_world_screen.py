@@ -78,6 +78,18 @@ class CreateWorldScreen:
         self._progress_label.text = "Starting world creation..."
         asyncio.ensure_future(self._run_creation(description))
 
+    async def _confirm_duplicate(self, title: str, conflicting_slug: str) -> str:
+        """Show a dialog asking whether to overwrite an existing world.
+
+        Returns ``"overwrite"`` or ``"cancel"``.
+        """
+        confirmed = await self._app.main_window.question_dialog(
+            "Duplicate World",
+            f"A world named '{title}' already exists (slug: '{conflicting_slug}').\n\n"
+            "Would you like to overwrite it?",
+        )
+        return "overwrite" if confirmed else "cancel"
+
     async def _run_creation(self, description: str) -> None:
         mgr = self._state.zforge_manager
         if mgr is None:
@@ -90,12 +102,17 @@ class CreateWorldScreen:
         result = await mgr.start_world_creation(
             input_text=description,
             on_status_update=on_update,
+            on_confirm_duplicate=self._confirm_duplicate,
         )
 
-        if result.get("status") == "complete":
+        status = result.get("status")
+        if status == "complete":
             self._progress_label.text = "World created successfully!"
             if self._on_done:
                 self._on_done()
+        elif status == "cancelled":
+            self._progress_label.text = "World creation cancelled."
+            self._create_btn.enabled = True
         else:
             reason = result.get("failure_reason", "Unknown error")
             self._progress_label.text = f"Failed: {reason}"

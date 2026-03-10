@@ -37,9 +37,12 @@ Each LLM connector, corresponding to a specific LLM provider, defines the follow
   - OpenAI
   - Google
   - Anthropic
+  - Groq (`langchain-groq` / `ChatGroq`; default model `llama-3.3-70b-versatile`; used as the default provider for document-parsing contextualization and Ask About World / librarian)
   Each one only needs an API key specified for that vendor, which must be stored in platform-specific secure storage.
   Each should be implemented with a package, if possible, rather than direct HTTP requests.
   Each one, if the provider allows for it, should call an API to get a list of model names the first time that this list is requested on each run of the application. For vendors that do not provide such an API, the list should be hard-coded based on available models at compile time (when the connector is created or updated).
+
+  **Groq model list (implementation note):** The `groq` Python SDK exposes `groq.Groq(api_key=...).models.list()`. The connector filters out non-chat models by excluding IDs containing: `whisper`, `tts`, `embed`, `guard`, `vision`. Fallback list (as of March 2026): `llama-3.3-70b-versatile`, `llama-3.3-70b-specdec`, `llama-3.1-8b-instant`, `llama-3.1-70b-versatile`, `gemma2-9b-it`, `qwen-qwq-32b`, `deepseek-r1-distill-llama-70b`, `deepseek-r1-distill-qwen-32b`, `mistral-saba-24b`.
 
   **OpenAI model list (implementation note):** The `openai` Python SDK exposes `openai.OpenAI(api_key=...).models.list()`, which returns _all_ models including non-chat types (image, audio, TTS, realtime, moderation, embeddings, Codex, Sora, etc.). The connector must filter this list to text-chat-completion models only. The current filter rule: include model IDs that start with `gpt-` or with `o` followed by a digit, and exclude any ID containing: `tts`, `transcribe`, `audio`, `realtime`, `image`, `search`, `moderation`, `embedding`, `dall-e`, `whisper`, `sora`, `babbage`, `davinci`, `codex`, `deep-research`, `computer-use`, `oss`, `chat-latest`. This fetch is performed synchronously and cached per process run; if the key is absent or the call fails, the hardcoded fallback list is used. The cached list is invalidated when the API key changes (e.g. via `set_api_key()`). Fallback list (as of March 2026): `gpt-5.4`, `gpt-5.4-pro`, `gpt-5-mini`, `gpt-5-nano`, `gpt-5`, `gpt-4.1`, `gpt-4o`, `gpt-4o-mini`.
 

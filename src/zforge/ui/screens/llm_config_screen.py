@@ -88,6 +88,8 @@ class LlmConfigScreen:
         self._chat_bar_label: toga.Label | None = None
         self._embed_bar_label: toga.Label | None = None
         self._download_status_label: toga.Label | None = None
+        self._chunk_size_input: toga.TextInput | None = None
+        self._chunk_overlap_pct_input: toga.TextInput | None = None
 
         self._outer = toga.Box(style=Pack(direction=COLUMN, padding=10))
         self._scroll = toga.ScrollContainer(
@@ -122,6 +124,7 @@ class LlmConfigScreen:
         self._build_node_section()
         self._build_provider_section()
         self._build_local_model_section()
+        self._build_parsing_section()
         self._build_button_row()
 
     def _build_node_section(self) -> None:
@@ -251,6 +254,74 @@ class LlmConfigScreen:
 
         self._download_status_label = toga.Label("", style=Pack(padding_top=4))
         self._outer.add(self._download_status_label)
+
+    def _build_parsing_section(self) -> None:
+        config_service = self._state.config_service
+        config = config_service.load() if config_service else None
+        chunk_size = config.parsing_chunk_size if config else 10000
+        chunk_overlap = config.parsing_chunk_overlap if config else 500
+        overlap_pct = round(chunk_overlap / chunk_size * 100) if chunk_size else 5
+
+        self._outer.add(_section_label("Parsing Pipeline"))
+        self._outer.add(
+            _sub_label(
+                "Controls how source documents are split before LLM processing.",
+                padding_bottom=6,
+            )
+        )
+
+        size_row = toga.Box(style=Pack(direction=ROW, padding_bottom=6, alignment="center"))
+        size_row.add(toga.Label("Chunk size:", style=Pack(width=140, padding_right=8)))
+        self._chunk_size_input = toga.TextInput(
+            value=str(chunk_size),
+            style=Pack(width=100, padding_right=6),
+        )
+        size_row.add(self._chunk_size_input)
+        size_row.add(toga.Label("characters", style=Pack()))
+        self._outer.add(size_row)
+
+        overlap_row = toga.Box(style=Pack(direction=ROW, padding_bottom=6, alignment="center"))
+        overlap_row.add(toga.Label("Chunk overlap:", style=Pack(width=140, padding_right=8)))
+        self._chunk_overlap_pct_input = toga.TextInput(
+            value=str(overlap_pct),
+            style=Pack(width=60, padding_right=6),
+        )
+        overlap_row.add(self._chunk_overlap_pct_input)
+        overlap_row.add(toga.Label("% of chunk size", style=Pack()))
+        self._outer.add(overlap_row)
+
+        # --- Retrieval split (vector store) ---
+        self._outer.add(
+            _sub_label(
+                "Retrieval split: each context chunk is re-split to the size below for the vector store.",
+                padding_top=6,
+                padding_bottom=4,
+            )
+        )
+
+        retrieval_size = config.parsing_retrieval_chunk_size if config else 500
+        retrieval_overlap_abs = config.parsing_retrieval_chunk_overlap if config else 50
+        retrieval_overlap_pct = round(retrieval_overlap_abs / retrieval_size * 100) if retrieval_size else 10
+
+        retrieval_size_row = toga.Box(style=Pack(direction=ROW, padding_bottom=6, alignment="center"))
+        retrieval_size_row.add(toga.Label("Retrieval chunk size:", style=Pack(width=140, padding_right=8)))
+        self._retrieval_chunk_size_input = toga.TextInput(
+            value=str(retrieval_size),
+            style=Pack(width=100, padding_right=6),
+        )
+        retrieval_size_row.add(self._retrieval_chunk_size_input)
+        retrieval_size_row.add(toga.Label("characters", style=Pack()))
+        self._outer.add(retrieval_size_row)
+
+        retrieval_overlap_row = toga.Box(style=Pack(direction=ROW, padding_bottom=6, alignment="center"))
+        retrieval_overlap_row.add(toga.Label("Retrieval overlap:", style=Pack(width=140, padding_right=8)))
+        self._retrieval_chunk_overlap_pct_input = toga.TextInput(
+            value=str(retrieval_overlap_pct),
+            style=Pack(width=60, padding_right=6),
+        )
+        retrieval_overlap_row.add(self._retrieval_chunk_overlap_pct_input)
+        retrieval_overlap_row.add(toga.Label("% of retrieval chunk size", style=Pack()))
+        self._outer.add(retrieval_overlap_row)
 
     def _build_button_row(self) -> None:
         btn_row = toga.Box(style=Pack(direction=ROW, padding_top=14, padding_bottom=10))
@@ -393,6 +464,26 @@ class LlmConfigScreen:
                 config.llm_nodes.setdefault(process_slug, {})[node_slug] = LlmNodeConfig(
                     provider=provider, model=model
                 )
+            if self._chunk_size_input and self._chunk_overlap_pct_input:
+                try:
+                    chunk_size = max(1, int(self._chunk_size_input.value or "10000"))
+                    overlap_pct = max(0, min(99, int(self._chunk_overlap_pct_input.value or "5")))
+                    config.parsing_chunk_size = chunk_size
+                    config.parsing_chunk_overlap = round(chunk_size * overlap_pct / 100)
+                except ValueError:
+                    pass
+            if self._retrieval_chunk_size_input and self._retrieval_chunk_overlap_pct_input:
+                try:
+                    retrieval_size = max(1, int(self._retrieval_chunk_size_input.value or "500"))
+                    retrieval_overlap_pct = max(
+                        0, min(99, int(self._retrieval_chunk_overlap_pct_input.value or "10"))
+                    )
+                    config.parsing_retrieval_chunk_size = retrieval_size
+                    config.parsing_retrieval_chunk_overlap = round(
+                        retrieval_size * retrieval_overlap_pct / 100
+                    )
+                except ValueError:
+                    pass
             config_service.save(config)
 
         for connector_name, text_input in self._api_key_inputs.items():
@@ -406,6 +497,12 @@ class LlmConfigScreen:
             else:
                 svc, key = REMOTE_CONNECTOR_KEYS[connector_name]
                 keyring.set_password(svc, key, value)
+
+        # Push the updated config into the live manager so cached graphs are
+        # rebuilt with the new provider/model settings on next use.
+        mgr = self._state.zforge_manager
+        if mgr is not None and config_service:
+            mgr.update_config(config_service.load())
 
         if self._on_done:
             self._on_done()

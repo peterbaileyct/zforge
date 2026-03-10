@@ -1,5 +1,5 @@
 # Parsing Documents to Z-Bundles
-Z-Forge has a standard [process](Processes.md) for extracting vector and graph data for a [Z-Bundle](RAG%20and%20GRAG%20Implementation.md) from free-text documents via [LLM](LLM%20Abstraction%20Layer.md). The basic process is to break the document into overlapping chunks and use an LLM to prepend the second through final chunks with "breadcrumbs" based on the prior chunk.
+Z-Forge has a standard [process](Processes.md) for extracting vector and graph data for a [Z-Bundle](RAG%20and%20GRAG%20Implementation.md) from free-text documents via [LLM](LLM%20Abstraction%20Layer.md). The pipeline uses a **two-pass split**: a coarse *context split* divides the document into large chunks for the sequential LLM breadcrumb loop; each contextualized large chunk is then re-split into smaller *retrieval chunks* for vector storage. This keeps the LLM call count proportional to the number of context chunks (not retrieval chunks), allowing precise vector retrieval without a prohibitively long contextualization phase.
 
 Input is always raw UTF-8 plain text.
 
@@ -8,14 +8,15 @@ This is a general pipeline. [World Generation](World%20Generation.md) is one spe
 ```mermaid
 flowchart TD
     subgraph Agents
-        A_ctx["Contextualizer\n(Google · gemini-2.5-flash-lite)"]
+        A_ctx["Contextualizer\n(Groq · llama-3.3-70b-versatile)"]
         A_gext["Graph Extractor\n(Google · gemini-2.5-flash-lite)"]
     end
 
     subgraph State
         S_input_text[/"input_text"/]
-        S_chunks[/"chunks"/]
-        S_documents[/"documents"/]
+        S_chunks[/"chunks\n(context pass)"/]
+        S_documents[/"documents\n(context chunks + breadcrumbs)"/]
+        S_retrieval_docs[/"retrieval_documents\n(small chunks + breadcrumbs)"/]
         S_chunk_idx[/"current_chunk_index"/]
     end
 
@@ -25,15 +26,16 @@ flowchart TD
     end
 
     subgraph Tools
-        T_splitter[RecursiveCharacterTextSplitter]
+        T_ctx_splitter["RecursiveCharacterTextSplitter\n(context pass)"]
+        T_ret_splitter["RecursiveCharacterTextSplitter\n(retrieval pass)"]
         T_lancedb[LanceDB.from_documents] --> R_vector
         T_llmgt[LLMGraphTransformer]
         T_kuzu[KuzuGraph.add_graph_documents] --> R_graph
     end
 
     subgraph Process
-        P_start(( )) --> P_splitter[Text Splitter]
-        P_splitter --> P_contextualizer[Contextualizer]
+        P_start(( )) --> P_splitter["Text Splitter\ncontext pass"]
+        P_splitter --> P_contextualizer["Contextualizer\n+ retrieval re-split"]
         P_contextualizer -->|next chunk| P_contextualizer
         P_contextualizer --> P_vector_ingest[Vector Ingestion]
         P_contextualizer --> P_graph_ingest[Graph Ingestion]
@@ -43,14 +45,18 @@ flowchart TD
 
     P_splitter <-.-> S_input_text
     P_splitter <-.-> S_chunks
-    P_splitter <-.-> T_splitter
+    P_splitter <-.-> T_ctx_splitter
     P_contextualizer <-.-> A_ctx
     P_contextualizer <-.-> S_chunk_idx
     P_contextualizer <-.-> S_documents
+    P_contextualizer <-.-> T_ret_splitter
+    P_contextualizer <-.-> S_retrieval_docs
     P_vector_ingest <-.-> T_lancedb
+    P_vector_ingest <-.-> S_retrieval_docs
     P_graph_ingest <-.-> A_gext
     P_graph_ingest <-.-> T_llmgt
     P_graph_ingest <-.-> T_kuzu
+    P_graph_ingest <-.-> S_documents
 ```
 
 ## Architectural Overview
@@ -67,7 +73,7 @@ Storage paths for both layers follow the Z-Bundle layout defined in [RAG and GRA
 
 ### LLM Node: Contextualizer
 
-Each LLM step in this pipeline is a configurable process node (see [Processes](Processes.md) and [LLM Abstraction Layer](LLM%20Abstraction%20Layer.md)). The **Contextualizer** node summarizes each chunk to generate a breadcrumb for the next chunk. Default: `gemini-2.5-flash-lite` (Google).
+Each LLM step in this pipeline is a configurable process node (see [Processes](Processes.md) and [LLM Abstraction Layer](LLM%20Abstraction%20Layer.md)). The **Contextualizer** node summarizes each chunk to generate a breadcrumb for the next chunk. Default: `llama-3.3-70b-versatile` (Groq).
 
 **Prompt template:**
 
@@ -75,13 +81,17 @@ Each LLM step in this pipeline is a configurable process node (see [Processes](P
 
 ### Implementation Details
 
-- **Text Splitting:** `langchain_text_splitters.RecursiveCharacterTextSplitter`
+- **Context Split:** `langchain_text_splitters.RecursiveCharacterTextSplitter` (context pass)
   - Method: `split_text()` (returns a list of strings)
-  - `chunk_size` and `chunk_overlap` are read from application configuration (see [Application Configuration](Application%20Configuration.md#parsing-pipeline)); defaults are **10,000 characters** and **500 characters** respectively.
-- **Stateful Loop:** Iterate through chunks sequentially.
-- **Object Creation:** Instantiate `langchain_core.documents.Document`
-  - `page_content`: the current chunk text
-  - `metadata`: dictionary containing the Contextualizer's summary from the *previous* iteration (the "Breadcrumb"); empty for the first chunk.
+  - `chunk_size` (`parsing_chunk_size`) and `chunk_overlap` (`parsing_chunk_overlap`) control the **LLM breadcrumb pass**. Defaults: **10,000 characters** and **500 characters** (5%) respectively. Configurable in the LLM Configuration screen (see [Application Configuration](Application%20Configuration.md#parsing-pipeline)).
+- **Stateful Loop:** Iterate through context chunks sequentially.
+- **Breadcrumb Document:** After the LLM summarizes a context chunk, a `langchain_core.documents.Document` is created:
+  - `page_content`: the context chunk text
+  - `metadata`: `{"breadcrumb": <summary from previous iteration>}` (empty for the first chunk)
+  These are accumulated in `state["documents"]` and consumed by **graph ingestion**.
+- **Retrieval Split (two-pass):** Each context chunk is immediately re-split by a second `RecursiveCharacterTextSplitter` (retrieval pass) into smaller sub-chunks. Defaults: **500 characters** and **50 characters** (10%) respectively, controlled by `parsing_retrieval_chunk_size` and `parsing_retrieval_chunk_overlap`. Each sub-chunk inherits the same breadcrumb as its parent context chunk.
+  These are accumulated in `state["retrieval_documents"]` and consumed by **vector ingestion**.
+  - When `parsing_retrieval_chunk_size ≥ parsing_chunk_size`, no re-split occurs and vector ingestion falls back to `state["documents"]` (single-pass behaviour).
 
 ## Phase 2: Parallel Ingestion (The "Fan-out")
 
@@ -131,9 +141,10 @@ To manage concurrency and rate limits:
 - **Process slug:** `document_parsing`
 - **Implementation file:** `src/zforge/graphs/document_parsing_graph.py` (new file)
 - **LLM nodes** (defined in `process_config.py`):
-  - `contextualizer` — Phase 1 breadcrumb generation; default `Google` / `gemini-2.5-flash-lite`
+  - `contextualizer` — Phase 1 breadcrumb generation; default `Groq` / `llama-3.3-70b-versatile`
   - `graph_extractor` — Phase 2 graph extraction via `LLMGraphTransformer`; default `Google` / `gemini-2.5-flash-lite`
-- **Chunk size defaults:** `parsing_chunk_size = 10000`, `parsing_chunk_overlap = 500`; stored in `ZForgeConfig` and read by the pipeline at runtime. (These are the defaults used at the code level; the chunk size is not yet user-configurable — see [User Experience](User%20Experience.md) for the planned TODO.)
+- **Context-pass chunk defaults:** `parsing_chunk_size = 10000`, `parsing_chunk_overlap = 500` (5%); stored in `ZForgeConfig`. These govern the LLM breadcrumb loop.
+- **Retrieval-pass chunk defaults:** `parsing_retrieval_chunk_size = 500`, `parsing_retrieval_chunk_overlap = 50` (10%); stored in `ZForgeConfig`. These govern the fine-grained vector-store split. When `parsing_retrieval_chunk_size ≥ parsing_chunk_size`, the pipeline runs single-pass (no re-split). Both sets of parameters are user-configurable via the **Parsing Pipeline** section of the LLM Configuration screen (chunk sizes in characters; overlaps expressed as percentages of the respective chunk size).
 - `allowed_nodes` and `allowed_relationships` for `LLMGraphTransformer` are not defined here; they are specified by the caller (e.g., World Generation).
 - **`DocumentParsingState`** (in `src/zforge/graphs/state.py`) — Add a new TypedDict for this process:
   ```python
@@ -142,8 +153,9 @@ To manage concurrency and rate limits:
       z_bundle_root: str                # Z-Bundle root path (target for LanceDB + KuzuDB)
       allowed_nodes: list[str]          # Passed from caller (e.g. World Generation)
       allowed_relationships: list[str]  # Passed from caller
-      chunks: list[str]                 # Split text chunks (set by Text Splitter node)
-      documents: list                   # LangChain Document objects with breadcrumbs (set by Contextualizer)
+      chunks: list[str]                 # Context-pass text chunks (set by Text Splitter node)
+      documents: list                   # Context-pass Document objects with breadcrumbs (graph ingestion)
+      retrieval_documents: list         # Retrieval-pass Document objects (vector ingestion)
       current_chunk_index: Annotated[int, operator.add]  # Phase 1 loop counter
       status: str
       status_message: str
@@ -173,6 +185,12 @@ To manage concurrency and rate limits:
 This affects both the write path (`LanceDBVectorStore.from_documents`) and the read path (`lancedb.connect()` in retriever tools).
 
 **Correct pattern:** Always use `await lancedb.connect_async(path)` from within async functions. Then use the native `AsyncTable` API for reads and writes. Only the embedding computation (the llama.cpp call) goes to `_LLAMA_EXECUTOR`; the LanceDB connection and table operations are awaited directly on the event loop.
+
+### KuzuDB database path must not be pre-created as a directory
+
+**Pitfall:** Calling `os.makedirs(graph_path, exist_ok=True)` before `kuzu.Database(graph_path)` creates `graph_path` as a directory. KuzuDB's `Database()` constructor then raises `Database path cannot be a directory: …/propertygraph`.
+
+**Correct pattern:** Do not `makedirs` the graph path. KuzuDB creates its own database file at the given path. The path string should be a plain file path (e.g. `{z_bundle_root}/propertygraph`) with no trailing slash.
 
 ### KuzuGraph requires `allow_dangerous_requests=True`
 
@@ -233,3 +251,84 @@ class _MultiTypeKuzuGraph(KuzuGraph):
 ```
 
 Call `graph._pre_create_schema(allowed_nodes)` immediately after constructing the instance, before `add_graph_documents`.
+
+### `embed_documents` batch overflow — `llama_decode returned -1`
+
+**Pitfall:** `LlamaCppEmbeddings.embed_documents(texts)` forwards the entire list of texts to `llama_cpp.create_embedding(texts)`, which feeds all texts into a single `decode_batch()` call. llama.cpp accumulates all input token sequences into one `llama_batch` and calls `llama_decode` on it. Even if each individual chunk is well within `n_ctx`, the combined batch of all chunks together overflows the decode capacity, causing `llama_decode` to return -1, surfaced as `RuntimeError: llama_decode returned -1`. This happens regardless of chunk size — even 500-char chunks hit this when there are many of them.
+
+**Correct pattern:** In `vector_ingestion_node`, call `embedder.embed_query(text)` for each text in a loop instead of `embedder.embed_documents(texts)`. `embed_query` processes one text per `llama_decode` call and always stays within `n_ctx`.
+
+```python
+def _embed_one_by_one(embed_texts):
+    return [embedder.embed_query(t) for t in embed_texts]
+
+vectors = await loop.run_in_executor(_LLAMA_EXECUTOR, lambda: _embed_one_by_one(texts_for_embed))
+```
+
+### Embedding context overflow — per-text truncation
+
+Even with per-text `embed_query()` calls, individual texts must not exceed `n_ctx` tokens. `EmbeddingConnector` exposes `get_context_size()`. In `vector_ingestion_node`, texts are truncated to `get_context_size() * 3` characters before embedding. Using `3` chars/token (rather than the English-prose average of ~4) provides a ~25% safety margin for BOS tokens and tokeniser variation. The full chunk text is stored verbatim in the LanceDB `text` field so retrieval quality is unaffected.
+
+```python
+embed_max_chars = embedding_connector.get_context_size() * 3
+texts_for_embed = [t[:embed_max_chars] for t in texts]
+```
+
+### Embedding repeated model construction — `llama_decode returned -1`
+
+**Pitfall:** If `get_embeddings()` creates a new `LlamaCppEmbeddings` instance on every call, repeated model construction and destruction cycles exhaust llama.cpp's Metal command queue on macOS. With many chunks (even short ones), each `embed_documents` call triggers a fresh model load, which destabilises the internal Metal state and causes `llama_decode returned -1` on a later iteration. This occurs regardless of chunk size.
+
+**Correct pattern:** Cache the `LlamaCppEmbeddings` instance inside `LlamaCppEmbeddingConnector` and return it on subsequent calls — the same pattern used by `LlamaCppConnector` for `ChatLlamaCpp`:
+
+```python
+def get_embeddings(self) -> Embeddings:
+    if self._embeddings is not None:
+        return self._embeddings
+    from langchain_community.embeddings import LlamaCppEmbeddings
+    self._embeddings = LlamaCppEmbeddings(...)
+    return self._embeddings
+```
+
+### LLM provider `400 Bad Request` during graph extraction
+
+**Pitfall:** `LLMGraphTransformer.aconvert_to_graph_documents(documents)` dispatches one LLM request per document concurrently. If any single chunk's content combined with the transformer's system prompt exceeds the provider's context limit (or is otherwise malformed), the provider returns `400 Bad Request`, which the transformer surfaces as an unhandled exception that aborts the entire batch.
+
+**Correct pattern:** Wrap the call in try/except. On failure, log a warning and set `graph_documents = []`. Use `except BaseException` (not just `except Exception`) because on Python 3.11+, `asyncio.TaskGroup` wraps failures in `ExceptionGroup(BaseException)` which can bypass `except Exception` in some contexts. Unwrap `exc.exceptions` (if present) to extract the individual provider error body for logging. The vector store written in the concurrent `vector_ingestion_node` is preserved; the world is still usable for RAG retrieval via the vector layer.
+
+**Note on Groq + `LLMGraphTransformer`:** Several Groq-hosted models (including `qwen/qwen3-32b`) do not reliably produce valid structured tool calls for the `DynamicGraph` schema used by `LLMGraphTransformer`. The error manifests as `400 Bad Request` with `code: tool_use_failed` and `failed_generation: ''`. The recommended graph extractor is `gemini-2.5-flash-lite` (Google), which has robust structured-output support. If Groq must be used, prefer models with proven function-calling support (e.g. `llama-3.3-70b-versatile`).
+
+### Graph extraction rate-limit exhaustion with large document sets
+
+**Pitfall:** `LLMGraphTransformer.aconvert_to_graph_documents(documents)` dispatches one LLM call **per document concurrently**. With thousands of chunks (e.g. a 5 MB world-bible at 500 chars/chunk ≈ 10,000 documents), this issues 10,000 simultaneous requests to the provider, immediately exhausting API rate limits.
+
+**Correct pattern:** Split the documents list into sequential batches (default `_GRAPH_EXTRACTION_BATCH_SIZE = 10`) and await each batch before starting the next. Each batch still fans out internally for its ≤10 documents; the sequential outer loop prevents rate-limit exhaustion. Failed batches are skipped (logged as warnings) so partial graph extraction succeeds rather than aborting the whole run.
+
+```python
+try:
+    graph_documents = await transformer.aconvert_to_graph_documents(documents)
+except BaseException as exc:
+    _causes = getattr(exc, "exceptions", [exc])  # unwrap ExceptionGroup
+    for _cause in _causes:
+        _response = getattr(_cause, "response", None)
+        if _response is not None:
+            log.warning("graph_ingestion_node: ... %s", _response.json())
+            break
+    graph_documents = []
+```
+
+### Groq 400 Bad Request in the contextualizer
+
+**Pitfall:** The contextualizer node (`model.ainvoke(...)`) has no error handling. If Groq returns a 400 for a specific chunk (e.g. due to malformed content or validation failure), the unhandled exception propagates through the LangGraph state machine and aborts the entire parse.
+
+**Correct pattern:** Wrap `model.ainvoke(...)` in try/except. On failure, log the actual Groq error body (available as `exc.response.json()` from `httpx.HTTPStatusError`) and continue with `summary = ""`. The affected chunk is still stored in the vector store; it simply has no breadcrumb forwarded to the next chunk, which is an acceptable degradation.
+
+```python
+try:
+    response = await model.ainvoke([SystemMessage(...), HumanMessage(...)])
+    summary = str(getattr(response, "content", ""))
+except Exception as exc:
+    _response = getattr(exc, "response", None)
+    _detail = _response.json() if _response is not None else ""
+    log.warning("contextualizer_node: chunk %d LLM call failed (%s %s)", idx+1, exc, _detail)
+    summary = ""
+```

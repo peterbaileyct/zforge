@@ -40,8 +40,8 @@ PROCESSES: list[ProcessSpec] = [
             NodeSpec(
                 slug="contextualizer",
                 display="Contextualizer",
-                default_provider="Google",
-                default_model="gemini-2.5-flash-lite",
+                default_provider="Groq",
+                default_model="llama-3.3-70b-versatile",
             ),
             NodeSpec(
                 slug="graph_extractor",
@@ -70,8 +70,8 @@ PROCESSES: list[ProcessSpec] = [
             NodeSpec(
                 slug="librarian",
                 display="Librarian",
-                default_provider="Google",
-                default_model="gemini-2.5-flash",
+                default_provider="Groq",
+                default_model="llama-3.3-70b-versatile",
             ),
         ),
     ),
@@ -83,4 +83,5 @@ REMOTE_CONNECTOR_KEYS: dict[str, tuple[str, str]] = {
     "OpenAI": ("zforge", "llm.openai.api_key"),
     "Google": ("zforge", "llm.google.api_key"),
     "Anthropic": ("zforge", "llm.anthropic.api_key"),
+    "Groq": ("zforge", "llm.groq.api_key"),
 }

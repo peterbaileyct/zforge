@@ -109,6 +109,16 @@ class ZForgeManager:
         log.info("run_process: finished — final status=%r", final_state.get("status"))
         return final_state
 
+    def update_config(self, config: ZForgeConfig) -> None:
+        """Refresh runtime config and invalidate cached graphs.
+
+        Call this after the user saves LLM configuration so the next world
+        creation (or other graph-backed process) picks up the new settings.
+        """
+        self._config = config
+        self._world_creation_graph = None
+        log.info("update_config: config refreshed, world creation graph reset")
+
     def _resolve_node_connector(
         self, process_slug: str, node_slug: str
     ) -> tuple[LlmConnector, str | None]:
@@ -139,8 +149,23 @@ class ZForgeManager:
         self,
         input_text: str,
         on_status_update: Callable[[str], None] | None = None,
+        on_confirm_duplicate: Callable[
+            [str, str], Coroutine
+        ] | None = None,
     ) -> dict[str, Any]:
-        """Run the world creation process."""
+        """Run the world creation process.
+
+        Parameters
+        ----------
+        input_text:
+            The raw world-bible text supplied by the user.
+        on_status_update:
+            Optional callback for streaming status messages to the UI.
+        on_confirm_duplicate:
+            Optional async callback invoked when a world with the same title
+            already exists.  Receives ``(new_title, conflicting_slug)`` and
+            must return ``"overwrite"`` or ``"cancel"``.
+        """
         if self._world_creation_graph is None:
             log.info("start_world_creation: building graph (first call)")
             # Resolve connectors for document_parsing sub-graph
@@ -169,14 +194,53 @@ class ZForgeManager:
         graph = self._world_creation_graph
         initial_state = {
             "input_text": input_text,
+            "world_uuid": None,
             "z_bundle_root": None,
             "zworld_kvp": None,
+            "conflicting_slug": None,
+            "overwrite_decision": None,
             "status": "parsing",
             "status_message": "Starting world creation...",
             "failure_reason": None,
             "messages": [],
         }
-        return await self.run_process(graph, initial_state, on_status_update)
+        result = await self.run_process(graph, initial_state, on_status_update)
+
+        if result.get("status") == "awaiting_confirmation":
+            if on_confirm_duplicate is None:
+                # No handler provided — default to cancel.
+                log.warning(
+                    "start_world_creation: duplicate detected but no "
+                    "on_confirm_duplicate callback — cancelling"
+                )
+                return {
+                    **result,
+                    "status": "cancelled",
+                    "status_message": "World creation cancelled: duplicate title detected.",
+                }
+
+            kvp = result.get("zworld_kvp") or {}
+            new_title = kvp.get("title", "")
+            conflicting_slug = result.get("conflicting_slug", "")
+            decision = await on_confirm_duplicate(new_title, conflicting_slug)
+            log.info(
+                "start_world_creation: duplicate decision=%r for title=%r",
+                decision,
+                new_title,
+            )
+
+            # Resume the graph with the decision; skip expensive nodes by
+            # forwarding the already-computed z_bundle_root and zworld_kvp.
+            resume_state = {
+                **result,
+                "overwrite_decision": decision,
+                "messages": [],  # reset to avoid spurious add_messages accumulation
+                "status": "resuming",
+                "status_message": f"Resuming world creation with decision: {decision}",
+            }
+            result = await self.run_process(graph, resume_state, on_status_update)
+
+        return result
 
     async def start_experience_generation(
         self,

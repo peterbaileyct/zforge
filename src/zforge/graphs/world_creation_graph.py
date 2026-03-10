@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import uuid as uuid_mod
 from typing import TYPE_CHECKING
 
@@ -105,10 +106,14 @@ def _make_document_parsing_node(
 
     @log_node("document_parsing")
     async def document_parsing_node(state: CreateWorldState) -> dict:
-        # Derive a temporary slug from first ~50 chars of input
-        title_hint = state["input_text"][:50].strip().split("\n")[0]
-        temp_slug = re.sub(r"[^a-z0-9]+", "-", title_hint.lower()).strip("-") or "world"
-        z_bundle_root = os.path.join(bundles_root, "world", temp_slug)
+        # If resuming after duplicate confirmation, parsing is already done — skip.
+        if state.get("z_bundle_root"):
+            log.info("document_parsing_node: z_bundle_root already set — skipping")
+            return {}
+
+        # Generate (or reuse) a stable UUID for this world's in-progress bundle.
+        world_uuid = state.get("world_uuid") or str(uuid_mod.uuid4())
+        z_bundle_root = os.path.join(bundles_root, "worlds-in-progress", world_uuid)
 
         parsing_state = {
             "input_text": state["input_text"],
@@ -131,6 +136,7 @@ def _make_document_parsing_node(
         )
 
         return {
+            "world_uuid": world_uuid,
             "z_bundle_root": z_bundle_root,
             "status": "summarizing",
             "status_message": "Document parsing complete; summarizing...",
@@ -148,6 +154,14 @@ def _make_summarizer_node(
 
     @log_node("summarizer")
     async def summarizer_node(state: CreateWorldState) -> dict:
+        # If resuming after duplicate confirmation, metadata is already set — skip.
+        if state.get("zworld_kvp"):
+            log.info("summarizer_node: zworld_kvp already set — skipping")
+            return {
+                "status": "finalizing",
+                "status_message": "Resuming with existing metadata...",
+            }
+
         if not _model_cache:
             _model_cache.append(llm_connector.get_model(model_name))
         model = _model_cache[0]
@@ -297,6 +311,57 @@ def _parse_summarizer_json(content: str) -> dict | None:
     return None
 
 
+def _make_duplicate_check_node(zworld_manager):
+    """Return a node that checks for an existing world with a matching title."""
+
+    @log_node("duplicate_check")
+    def duplicate_check_node(state: CreateWorldState) -> dict:
+        # If the user has already made a decision (resuming), act on it.
+        overwrite_decision = state.get("overwrite_decision")
+        if overwrite_decision == "cancel":
+            return {
+                "status": "cancelled",
+                "status_message": "World creation cancelled by user.",
+            }
+        if overwrite_decision == "overwrite":
+            return {
+                "status": "finalizing",
+                "status_message": "Overwriting existing world...",
+            }
+
+        # No decision yet — check for a title collision.
+        kvp = state.get("zworld_kvp") or {}
+        title = kvp.get("title", "")
+        title_slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+
+        if zworld_manager is not None and title_slug:
+            for w in zworld_manager.list_all():
+                existing_slug = re.sub(r"[^a-z0-9]+", "-", w.title.lower()).strip("-")
+                if existing_slug == title_slug:
+                    log.info(
+                        "duplicate_check_node: collision — new title %r matches existing %r (%r)",
+                        title,
+                        w.title,
+                        w.slug,
+                    )
+                    return {
+                        "status": "awaiting_confirmation",
+                        "conflicting_slug": w.slug,
+                        "status_message": (
+                            f"A world named '{w.title}' already exists. "
+                            "Please confirm whether to overwrite."
+                        ),
+                    }
+
+        # No conflict — proceed straight to finalisation.
+        return {
+            "status": "finalizing",
+            "status_message": "No duplicate found; finalizing...",
+        }
+
+    return duplicate_check_node
+
+
 def _make_finalizer_node(zworld_manager):
     """Return a deterministic node that constructs ZWorld and writes the Z-Bundle."""
 
@@ -316,10 +381,13 @@ def _make_finalizer_node(zworld_manager):
         title = kvp.get("title", "Unknown World")
         slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
 
+        # Use the UUID that was assigned at the very start of the pipeline.
+        world_uuid = state.get("world_uuid") or str(uuid_mod.uuid4())
+
         zworld = ZWorld(
             title=title,
             slug=slug,
-            uuid=str(uuid_mod.uuid4()),
+            uuid=world_uuid,
             summary=kvp.get("summary", ""),
             setting_era=kvp.get("setting_era", ""),
             source_canon=kvp.get("source_canon", []),
@@ -327,20 +395,36 @@ def _make_finalizer_node(zworld_manager):
         )
 
         if zworld_manager is not None:
-            # Rename Z-Bundle directory from temp slug to final slug
+            # Move the in-progress bundle to its final location.
             old_root = state.get("z_bundle_root", "")
-            new_root = os.path.join(os.path.dirname(old_root), slug) if old_root else ""
-            if old_root and new_root and old_root != new_root and os.path.exists(old_root):
+            new_root = str(zworld_manager._world_root(slug))
+
+            # If overwriting, remove the old world first.
+            conflicting_slug = state.get("conflicting_slug")
+            if state.get("overwrite_decision") == "overwrite" and conflicting_slug:
+                existing_path = zworld_manager._world_root(conflicting_slug)
+                if existing_path.exists():
+                    shutil.rmtree(existing_path)
+                    log.info(
+                        "finalizer_node: deleted existing world at %s", existing_path
+                    )
+
+            if old_root and os.path.exists(old_root):
+                os.makedirs(os.path.dirname(new_root), exist_ok=True)
                 os.rename(old_root, new_root)
+                log.info(
+                    "finalizer_node: moved bundle %s → %s", old_root, new_root
+                )
 
             zworld_manager.create(zworld, raw_text=state["input_text"])
         else:
             log.error(
                 "finalizer_node: ZWorldManager not provided — Z-Bundle not written"
             )
+            new_root = ""
 
         return {
-            "z_bundle_root": new_root if old_root != new_root else old_root,
+            "z_bundle_root": new_root,
             "status": "complete",
             "status_message": f"World '{title}' created successfully",
         }
@@ -352,14 +436,23 @@ def _make_finalizer_node(zworld_manager):
 
 
 def _route_after_summarizer(state: CreateWorldState) -> str:
-    """Loop back to summarizer if tool calls are pending, else finalize."""
+    """Loop back to summarizer if tool calls are pending, else run duplicate check."""
     status = state.get("status", "")
     if status == "finalizing":
-        return "finalizer"
+        return "duplicate_check"
     if status == "failed":
         return "end"
     # Still summarizing (tool calls were made) — loop back
     return "summarizer"
+
+
+def _route_after_duplicate_check(state: CreateWorldState) -> str:
+    """Route to finalizer if clear to proceed, otherwise end (await user or cancel)."""
+    status = state.get("status", "")
+    if status == "finalizing":
+        return "finalizer"
+    # "awaiting_confirmation", "cancelled", "failed" all exit the graph.
+    return "end"
 
 
 # --- Graph Builder ---
@@ -390,7 +483,8 @@ def build_create_world_graph(
     zworld_manager:
         ZWorldManager instance for writing the final Z-Bundle.
     config:
-        ZForgeConfig providing parsing_chunk_size and parsing_chunk_overlap.
+        ZForgeConfig providing parsing_chunk_size, parsing_chunk_overlap,
+        parsing_retrieval_chunk_size, and parsing_retrieval_chunk_overlap.
     bundles_root:
         Root directory for Z-Bundles (e.g. "bundles/").
     summarizer_model / contextualizer_model / graph_extractor_model:
@@ -416,6 +510,9 @@ def build_create_world_graph(
             summarizer_connector, embedding_connector, summarizer_model
         ),
     )
+    graph.add_node(
+        "duplicate_check", _make_duplicate_check_node(zworld_manager)
+    )
     graph.add_node("finalizer", _make_finalizer_node(zworld_manager))
 
     graph.set_entry_point("document_parsing")
@@ -425,6 +522,14 @@ def build_create_world_graph(
         _route_after_summarizer,
         {
             "summarizer": "summarizer",
+            "duplicate_check": "duplicate_check",
+            "end": END,
+        },
+    )
+    graph.add_conditional_edges(
+        "duplicate_check",
+        _route_after_duplicate_check,
+        {
             "finalizer": "finalizer",
             "end": END,
         },

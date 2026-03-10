@@ -80,6 +80,8 @@ class ZForgeConfig:
     )
     parsing_chunk_size: int = 10000
     parsing_chunk_overlap: int = 500
+    parsing_retrieval_chunk_size: int = 500
+    parsing_retrieval_chunk_overlap: int = 50
 
     def to_dict(self) -> dict[str, Any]:
         llm_nodes_dict: dict[str, Any] = {}
@@ -102,6 +104,8 @@ class ZForgeConfig:
             "llm_nodes": llm_nodes_dict,
             "parsing_chunk_size": self.parsing_chunk_size,
             "parsing_chunk_overlap": self.parsing_chunk_overlap,
+            "parsing_retrieval_chunk_size": self.parsing_retrieval_chunk_size,
+            "parsing_retrieval_chunk_overlap": self.parsing_retrieval_chunk_overlap,
         }
 
     @classmethod
@@ -128,4 +132,6 @@ class ZForgeConfig:
             llm_nodes=llm_nodes,
             parsing_chunk_size=data.get("parsing_chunk_size", 10000),
             parsing_chunk_overlap=data.get("parsing_chunk_overlap", 500),
+            parsing_retrieval_chunk_size=data.get("parsing_retrieval_chunk_size", 500),
+            parsing_retrieval_chunk_overlap=data.get("parsing_retrieval_chunk_overlap", 50),
         )

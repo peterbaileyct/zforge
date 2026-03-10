@@ -5,7 +5,7 @@ Z-Worlds are stored as Z-Bundles at bundles/world/{slug}/ containing:
   content_advisories, embedding model identity
 - source.txt: original raw input text
 - vector/: LanceDB vector store (populated by document_parsing_graph)
-- propertygraph/: KùzuDB property graph (populated by document_parsing_graph)
+- propertygraph: KùzuDB property graph file (populated by document_parsing_graph)
 
 Implements: src/zforge/managers/zworld_manager.py per
 docs/Z-World.md, docs/RAG and GRAG Implementation.md,
