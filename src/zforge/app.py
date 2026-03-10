@@ -119,6 +119,7 @@ class ZForgeApp(toga.App):
             self._show_llm_config(show_no_config_message=True)
         elif llm_connector.validate() and embedding_connector.validate():
             asyncio.ensure_future(self._prewarm_llm(llm_connector))
+            asyncio.ensure_future(self._prewarm_embedding(embedding_connector))
             self._show_home()
         else:
             self._show_llm_config(show_no_config_message=False)
@@ -143,6 +144,16 @@ class ZForgeApp(toga.App):
             log.info("_prewarm_llm: LLM model ready")
         except Exception:
             log.exception("_prewarm_llm: LLM model load failed")
+
+    async def _prewarm_embedding(self, embedding_connector) -> None:
+        """Load the embedding model in a background thread so it is cached before first use."""
+        log.info("_prewarm_embedding: loading embedding model in background thread")
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, embedding_connector.get_embeddings)
+            log.info("_prewarm_embedding: embedding model ready")
+        except Exception:
+            log.exception("_prewarm_embedding: embedding model load failed")
 
     def _show_home(self) -> None:
         from zforge.ui.screens.home_screen import HomeScreen

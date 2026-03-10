@@ -30,7 +30,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langgraph.graph import END, StateGraph
 
-from zforge.graphs.graph_utils import extract_text_content, log_node
+from zforge.graphs.graph_utils import extract_text_content, log_node, make_retrieve_graph_tool
 from zforge.graphs.state import CreateWorldState
 from zforge.graphs.document_parsing_graph import _LLAMA_EXECUTOR
 
@@ -195,21 +195,7 @@ def _make_summarizer_node(
                 return "No results found."
             return "\n\n---\n\n".join(t for t in texts if t)
 
-        @tool
-        def retrieve_graph(query: str) -> str:
-            """Query the Z-Bundle's property graph for structured entity data.
-
-            Args:
-                query: A Cypher-style query or entity name to look up.
-            """
-            import kuzu
-            from langchain_community.graphs import KuzuGraph
-
-            graph_path = f"{z_bundle_root}/propertygraph"
-            db = kuzu.Database(graph_path)
-            graph = KuzuGraph(db, allow_dangerous_requests=True)
-            schema = graph.get_schema
-            return f"Graph schema:\n{schema}\n\nUse retrieve_vector for detailed content."
+        retrieve_graph = make_retrieve_graph_tool(z_bundle_root)
 
         tools = [retrieve_vector, retrieve_graph]
         messages = list(state.get("messages") or [])

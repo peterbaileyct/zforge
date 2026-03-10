@@ -165,6 +165,122 @@ def chunk_text(text: str, max_chars: int, overlap_chars: int = 200) -> list[str]
     return chunks
 
 
+def make_retrieve_graph_tool(z_bundle_root: str):
+    """Factory that returns a ``retrieve_graph`` LangChain tool for a Z-Bundle.
+
+    The returned tool has two execution branches:
+
+    1. **Cypher** — if *query* starts with ``MATCH``, ``WITH``, ``CALL``,
+       ``OPTIONAL``, or ``UNWIND``, it is executed directly via
+       ``KuzuGraph.query()``.  On error or empty results the graph schema is
+       appended so the caller can write a corrected query.
+
+    2. **Keyword / entity-name search** — otherwise, each word in *query* is
+       matched case-insensitively against the ``id`` property of every
+       standard entity node table (Character, Location, Faction, Event, …).
+       For every hit the tool expands one hop of outgoing and incoming
+       relationships (Chunk nodes excluded), returning relationship type,
+       neighbour type, and neighbour id.  Schema is only returned when no
+       entities are found.
+
+    Args:
+        z_bundle_root: Filesystem path to the Z-Bundle root directory,
+            used to open ``{root}/propertygraph``.
+    """
+    from langchain_core.tools import tool
+
+    _ENTITY_LABELS = [
+        "Character", "Location", "Faction", "Event", "Occupation",
+        "Species", "Concept", "Artifact", "Prophecy", "Era",
+        "Culture", "Deity", "Trope", "Mechanic",
+    ]
+    _CYPHER_STARTS = {"MATCH", "WITH", "CALL", "OPTIONAL", "UNWIND"}
+
+    @tool
+    def retrieve_graph(query: str) -> str:
+        """Query the Z-Bundle's property graph for structured entity data.
+
+        Pass a Cypher query (starting with MATCH / WITH / CALL) to execute it
+        directly, or pass a keyword or entity name to search for matching
+        entities and their 1-hop relationships.
+
+        Args:
+            query: A Cypher query or a keyword / entity name to look up.
+        """
+        import kuzu
+        from langchain_community.graphs import KuzuGraph
+
+        graph_path = f"{z_bundle_root}/propertygraph"
+        db = kuzu.Database(graph_path)
+        graph = KuzuGraph(db, allow_dangerous_requests=True)
+
+        q = query.strip()
+        first_word = q.split()[0].upper() if q.split() else ""
+
+        # --- Branch 1: Direct Cypher execution ---
+        if first_word in _CYPHER_STARTS:
+            try:
+                rows = graph.query(q)
+                if not rows:
+                    return f"No results.\n\nSchema for reference:\n{graph.get_schema}"
+                return "\n".join(str(r) for r in rows[:50])
+            except Exception as exc:
+                return f"Cypher error: {exc}\n\nSchema for reference:\n{graph.get_schema}"
+
+        # --- Branch 2: Keyword / entity-name search + 1-hop expansion ---
+        keyword = q.lower()
+        hits: list[tuple[str, str]] = []
+        for label in _ENTITY_LABELS:
+            try:
+                rows = graph.query(
+                    f"MATCH (n:{label}) WHERE toLower(n.id) CONTAINS $kw RETURN n.id LIMIT 8",
+                    params={"kw": keyword},
+                )
+                hits.extend((label, row["n.id"]) for row in rows if row.get("n.id"))
+            except Exception:
+                pass  # table may not exist in this world's graph
+
+        if not hits:
+            return f"No entities found matching '{q}'.\n\nSchema for reference:\n{graph.get_schema}"
+
+        parts: list[str] = []
+        for label, node_id in hits[:10]:
+            lines = [f"[{label}] {node_id}"]
+            # Outgoing edges
+            try:
+                for row in graph.query(
+                    f"MATCH (n:{label})-[r]->(m) WHERE n.id = $id "
+                    f"RETURN type(r) AS rel, label(m) AS m_label, m.id AS target LIMIT 20",
+                    params={"id": node_id},
+                ):
+                    if row.get("m_label") == "Chunk":
+                        continue
+                    lines.append(
+                        f"  -[{row.get('rel')}]-> [{row.get('m_label')}] {row.get('target')}"
+                    )
+            except Exception:
+                pass
+            # Incoming edges
+            try:
+                for row in graph.query(
+                    f"MATCH (m)-[r]->(n:{label}) WHERE n.id = $id "
+                    f"RETURN type(r) AS rel, label(m) AS m_label, m.id AS source LIMIT 20",
+                    params={"id": node_id},
+                ):
+                    if row.get("m_label") == "Chunk":
+                        continue
+                    lines.append(
+                        f"  <-[{row.get('rel')}]- [{row.get('m_label')}] {row.get('source')}"
+                    )
+            except Exception:
+                pass
+            parts.append("\n".join(lines))
+
+        return "\n\n".join(parts)
+
+    return retrieve_graph
+
+
 def extract_text_content(content: Any) -> str:  # noqa: ANN401
     """Extract plain text from an LLM ``response.content`` value.
 

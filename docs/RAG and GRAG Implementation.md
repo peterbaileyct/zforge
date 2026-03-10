@@ -21,3 +21,15 @@ Property graphs are recorded in a KùzuDB database file at `{root}/propertygraph
 - **Per-type node tables** — one node table per entity type in `allowed_nodes` (e.g., `Character`, `Location`, `Event`, `Faction`). Node properties include at minimum `id` and `text`.
 - **Per-type-pair relationship tables** — one rel table per (source-type, relationship-type, target-type) triple encountered in the extracted data. The relationship type is encoded in the table name rather than stored as a column.
 - **`Chunk` node table** (when `include_source=True`) — one node per source text chunk, with edges from every extracted entity node back to the chunk it was extracted from, enabling hybrid lookup: given any entity, retrieve the original passage.
+
+### Pitfall: `retrieve_graph` must execute queries, not just return the schema
+
+A naive implementation of `retrieve_graph` that returns only `graph.get_schema` wastes a full LLM round-trip: the model receives the schema, realises it contains no data, and immediately calls `retrieve_vector` instead. The schema dump is also misleading — the docstring advertises "A Cypher-style query or entity name to look up", but nothing is actually looked up.
+
+**The correct pattern** (implemented in `graph_utils.make_retrieve_graph_tool`) has two branches:
+
+1. **Cypher branch** — if the query begins with a Cypher keyword (`MATCH`, `WITH`, `CALL`, etc.), execute it via `KuzuGraph.query(cypher)`, which delegates to `kuzu.Connection.execute()`. Return the rows directly (up to 50). On error or empty results, append the schema so the model can correct the query.
+
+2. **Keyword branch** — otherwise, search the `id` property of every standard entity node table case-insensitively via `toLower(n.id) CONTAINS $kw`, using `KuzuGraph.query(cypher, params={"kw": keyword})` (parameterised queries are supported). For each matched entity, expand one hop of outgoing and incoming edges — excluding `Chunk` nodes — and include relationship type via `type(r)` and neighbour type via `label(m)`. Return schema only when no entities match.
+
+This ensures that for factual questions (e.g. "who are the queens?"), the graph tool returns the matched `Character` nodes and their relationships directly, often eliminating the need for a `retrieve_vector` call and saving an LLM round-trip (~1–2 s on Groq).

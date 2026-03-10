@@ -25,7 +25,7 @@ from langchain_core.tools import tool
 from langgraph.graph import END, StateGraph
 
 from zforge.graphs.document_parsing_graph import _LLAMA_EXECUTOR
-from zforge.graphs.graph_utils import extract_text_content, log_node
+from zforge.graphs.graph_utils import extract_text_content, log_node, make_retrieve_graph_tool
 from zforge.graphs.state import AskAboutWorldState
 
 log = logging.getLogger(__name__)
@@ -90,36 +90,30 @@ def _make_librarian_node(
                 return "No results found."
             return "\n\n---\n\n".join(t for t in texts if t)
 
-        @tool
-        def retrieve_graph(query: str) -> str:
-            """Query the Z-Bundle's property graph for structured entity data.
-
-            Args:
-                query: A Cypher-style query or entity name to look up.
-            """
-            import kuzu
-            from langchain_community.graphs import KuzuGraph
-
-            graph_path = f"{z_bundle_root}/propertygraph"
-            db = kuzu.Database(graph_path)
-            graph = KuzuGraph(db, allow_dangerous_requests=True)
-            schema = graph.get_schema
-            return f"Graph schema:\n{schema}\n\nUse retrieve_vector for detailed content."
+        retrieve_graph = make_retrieve_graph_tool(z_bundle_root)
 
         tools = [retrieve_vector, retrieve_graph]
         tool_map = {t.name: t for t in tools}
         bound_model = model.bind_tools(tools)
 
         # Seed messages: two system prompts + user question
-        secondary_prompt = (
+        world_context = (
             "The following is a description of the fictional world about "
             "which you will answer questions.\n\n"
             + json.dumps(state["zworld_kvp"], indent=2)
         )
+        # World context is placed in the HumanMessage rather than the system
+        # prompt. Groq/Llama models use a chat template that embeds tool
+        # definitions via <function=name> delimiters; any `<` / `>` characters
+        # in the system turn (common in world JSON with arrows, HTML, etc.)
+        # corrupt that template, producing malformed tool calls (tool_use_failed).
+        # Keeping the system prompt to plain behavioural instructions only avoids
+        # this entirely.
         messages = [
             SystemMessage(content=_LIBRARIAN_SYSTEM_PROMPT),
-            SystemMessage(content=secondary_prompt),
-            HumanMessage(content=state["user_question"]),
+            HumanMessage(
+                content=world_context + "\n\nQuestion: " + state["user_question"]
+            ),
         ]
 
         # Tool-call loop: invoke model, process tool calls, repeat until done
