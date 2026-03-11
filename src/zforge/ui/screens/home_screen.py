@@ -31,6 +31,10 @@ class HomeScreen:
             on_select=self._on_world_selected,
         )
         self._selected_world_slug: str | None = None
+        self._exp_label = toga.Label(
+            "Experiences",
+            style=Pack(padding_top=8, padding_bottom=2),
+        )
         self._experience_list = toga.Table(
             headings=["Experience"],
             style=Pack(flex=1),
@@ -48,11 +52,7 @@ class HomeScreen:
         self._box.add(title)
         self._box.add(self._world_list)
 
-        exp_label = toga.Label(
-            "Experiences",
-            style=Pack(padding_top=8, padding_bottom=2),
-        )
-        self._box.add(exp_label)
+        self._box.add(self._exp_label)
         self._box.add(self._experience_list)
 
         button_row = toga.Box(style=Pack(direction=ROW, padding_top=10))
@@ -106,6 +106,9 @@ class HomeScreen:
         if mgr is None:
             return
 
+        # Reset selection if it's no longer valid
+        self._selected_world_slug = None
+
         worlds = mgr.zworld_manager.list_all()
         self._world_list.data.clear()
         self._worlds = worlds
@@ -131,10 +134,16 @@ class HomeScreen:
         mgr = self._state.zforge_manager
         if mgr is None:
             return
+
         if self._selected_world_slug:
+            self._exp_label.style.visibility = "visible"
+            self._experience_list.style.visibility = "visible"
             experiences = mgr.experience_manager.list_for_world(self._selected_world_slug)
         else:
-            experiences = mgr.experience_manager.list_all()
+            self._exp_label.style.visibility = "hidden"
+            self._experience_list.style.visibility = "hidden"
+            experiences = []
+
         self._experiences: list = experiences
         for exp in experiences:
             self._experience_list.data.append(exp.name)
