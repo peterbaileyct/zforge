@@ -20,3 +20,12 @@ Nearly all application preferences are persisted as JSON in `zforge_config.json`
 Process-specific LLM configuration — such as the per-node provider/model pairing used by world generation — is described in the [World Generation](World%20Generation.md#implementation) spec. That document is authoritative for the structure of the `llm_nodes` map stored inside `zforge_config.json`, while this file describes the general storage surface and validation/secure-storage guarantees.
 
 `ZForgeApp.startup` asks `ConfigService.has_llm_config()` to check for a non-empty `llm_nodes` section in the raw JSON (not `exists()` alone); when that check fails the app immediately opens the LLM Configuration screen with an explanatory message ([src/zforge/app.py](src/zforge/app.py#L41-L120)). Process / node default values are defined once in [src/zforge/models/process_config.py](src/zforge/models/process_config.py) and consumed by both `ConfigService._apply_defaults` and `LlmConfigScreen`.
+
+### Adding a New Process Node
+
+**Contract:** Adding a `ProcessSpec` / `NodeSpec` entry to `PROCESSES` in [src/zforge/models/process_config.py](src/zforge/models/process_config.py) is the **only** code change needed for a new node to be:
+
+1. **Defaulted on startup** — `ConfigService._apply_defaults` iterates `PROCESSES` and inserts `LlmNodeConfig(provider=..., model=...)` for any node not already present in `llm_nodes`.
+2. **Shown in the LLM Configuration screen** — `LlmConfigScreen._build_node_section` iterates `PROCESSES` and renders a provider/model row for every node.
+
+No changes are required to `ConfigService`, `LlmConfigScreen`, or `ZForgeConfig` when registering a new process or node.
