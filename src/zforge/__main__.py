@@ -2,7 +2,9 @@
 
 import logging
 
-from zforge.app import ZForgeApp
+import flet as ft
+
+from zforge.app import main as app_main
 
 
 def _configure_logging() -> None:
@@ -21,11 +23,7 @@ def _configure_logging() -> None:
 
 def main() -> None:
     _configure_logging()
-    app = ZForgeApp(
-        "Z-Forge",
-        "org.zforge.zforge",
-    )
-    app.main_loop()
+    ft.app(target=app_main)
 
 
 if __name__ == "__main__":

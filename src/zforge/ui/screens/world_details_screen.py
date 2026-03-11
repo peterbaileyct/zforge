@@ -10,12 +10,9 @@ docs/User Experience.md — World Details Screen section.
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING, Callable
 
-import toga
-from toga.style import Pack
-from toga.style.pack import COLUMN, ROW
+import flet as ft
 
 if TYPE_CHECKING:
     from zforge.app_state import AppState
@@ -26,106 +23,87 @@ class WorldDetailsScreen:
 
     def __init__(
         self,
-        app: toga.App,
+        page: ft.Page,
         app_state: AppState,
         slug: str,
         on_done: Callable[[], None] | None = None,
     ) -> None:
-        self._app = app
+        self._page = page
         self._state = app_state
         self._slug = slug
         self._on_done = on_done
-        self._box = toga.Box(style=Pack(direction=COLUMN, padding=10))
-        self._build_ui()
 
-    def _build_ui(self) -> None:
+    def build(self) -> ft.Control:
         mgr = self._state.zforge_manager
         if mgr is None:
-            self._box.add(toga.Label("Error: not initialized."))
-            return
+            return ft.Column([ft.Text("Error: not initialized.")])
 
         zworld = mgr.zworld_manager.read(self._slug)
         if zworld is None:
-            self._box.add(toga.Label(f"World '{self._slug}' not found."))
-            self._add_back_button()
-            return
+            return ft.Column([
+                ft.Text(f"World '{self._slug}' not found."),
+                ft.ElevatedButton("Back", on_click=self._on_back),
+            ])
+
+        controls: list[ft.Control] = []
 
         # Embedding mismatch warning
         if mgr.zworld_manager.check_embedding_mismatch(self._slug):
-            warning = toga.Label(
-                "⚠ This world was encoded with a different embedding model. "
-                "Search quality may be degraded until it is re-encoded.",
-                style=Pack(
-                    padding=8,
-                    font_style="italic",
+            controls.append(
+                ft.Text(
+                    "⚠ This world was encoded with a different embedding model. "
+                    "Search quality may be degraded until it is re-encoded.",
+                    italic=True,
                     color="#b8860b",
-                ),
+                )
             )
-            self._box.add(warning)
 
-        # Title
-        title = toga.Label(
-            zworld.title,
-            style=Pack(padding_bottom=10, font_size=20, font_weight="bold"),
+        controls.append(ft.Text(zworld.title, size=20, weight=ft.FontWeight.BOLD))
+
+        controls.append(
+            ft.TextField(
+                read_only=True,
+                multiline=True,
+                value=zworld.summary,
+                expand=True,
+            )
         )
-        self._box.add(title)
 
-        # Scrollable read-only summary
-        summary = toga.MultilineTextInput(
-            readonly=True,
-            value=zworld.summary,
-            style=Pack(flex=1, padding_bottom=10),
+        self._question_input = ft.TextField(
+            hint_text="Ask a question about this world\u2026",
+            expand=True,
         )
-        self._box.add(summary)
+        self._ask_btn = ft.ElevatedButton("Ask", on_click=self._on_ask)
+        controls.append(ft.Row([self._question_input, self._ask_btn]))
 
-        # Question input row
-        question_row = toga.Box(style=Pack(direction=ROW, padding_bottom=5))
-        self._question_input = toga.TextInput(
-            placeholder="Ask a question about this world\u2026",
-            style=Pack(flex=1),
+        self._answer_area = ft.TextField(
+            read_only=True,
+            multiline=True,
+            expand=True,
         )
-        question_row.add(self._question_input)
+        controls.append(self._answer_area)
+        controls.append(ft.ElevatedButton("Back", on_click=self._on_back))
 
-        self._ask_btn = toga.Button(
-            "Ask",
-            on_press=self._on_ask,
-            style=Pack(padding_left=5),
-        )
-        question_row.add(self._ask_btn)
-        self._box.add(question_row)
+        return ft.Column(controls, spacing=10, expand=True)
 
-        # Read-only answer area
-        self._answer_area = toga.MultilineTextInput(
-            readonly=True,
-            style=Pack(flex=1, padding_bottom=10),
-        )
-        self._box.add(self._answer_area)
-
-        self._add_back_button()
-
-    def _add_back_button(self) -> None:
-        back_btn = toga.Button(
-            "Back",
-            on_press=self._on_back,
-            style=Pack(padding_top=5),
-        )
-        self._box.add(back_btn)
-
-    def _on_ask(self, widget) -> None:
+    def _on_ask(self, e: ft.ControlEvent) -> None:
         question = self._question_input.value.strip()
         if not question:
             self._answer_area.value = "Please enter a question."
+            self._page.update()
             return
 
-        self._ask_btn.enabled = False
+        self._ask_btn.disabled = True
         self._answer_area.value = "\u2026"
-        asyncio.ensure_future(self._run_ask(question))
+        self._page.update()
+        self._page.run_task(self._run_ask, question)
 
     async def _run_ask(self, question: str) -> None:
         mgr = self._state.zforge_manager
         if mgr is None:
             self._answer_area.value = "Error: not initialized."
-            self._ask_btn.enabled = True
+            self._ask_btn.disabled = False
+            self._page.update()
             return
 
         try:
@@ -134,12 +112,9 @@ class WorldDetailsScreen:
         except Exception as exc:
             self._answer_area.value = f"Error: {exc}"
         finally:
-            self._ask_btn.enabled = True
+            self._ask_btn.disabled = False
+            self._page.update()
 
-    def _on_back(self, widget) -> None:
+    def _on_back(self, e: ft.ControlEvent) -> None:
         if self._on_done:
             self._on_done()
-
-    @property
-    def box(self) -> toga.Box:
-        return self._box

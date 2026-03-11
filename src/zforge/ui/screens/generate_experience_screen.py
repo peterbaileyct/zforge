@@ -7,16 +7,12 @@ docs/User Experience.md.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import TYPE_CHECKING, Callable
 
-import toga
+import flet as ft
 
 log = logging.getLogger(__name__)
-from toga.style import Pack
-from toga.style.pack import COLUMN
-import logging
 
 if TYPE_CHECKING:
     from zforge.app_state import AppState
@@ -28,98 +24,75 @@ class GenerateExperienceScreen:
 
     def __init__(
         self,
-        app: toga.App,
+        page: ft.Page,
         app_state: AppState,
         zworld: ZWorld,
         on_done: Callable[[], None] | None = None,
     ) -> None:
-        self._app = app
+        self._page = page
         self._state = app_state
         self._zworld = zworld
         self._on_done = on_done
         self._last_experience = None
-        self._box = toga.Box(style=Pack(direction=COLUMN, padding=10))
-        self._progress_label = toga.Label("", style=Pack(padding_top=10, flex=1))
-        self._rationale_label = toga.Label("", style=Pack(padding_top=5, font_style="italic", flex=1))
-        self._action_log = toga.MultilineTextInput(
-            readonly=True,
-            style=Pack(flex=1, padding_top=5, height=180),
-        )
-        self._build_ui()
 
-    def _build_ui(self) -> None:
-        title = toga.Label(
-            "Generate Experience",
-            style=Pack(padding_bottom=10, font_size=16, font_weight="bold"),
+    def build(self) -> ft.Control:
+        self._progress_label = ft.Text("")
+        self._rationale_label = ft.Text("", italic=True)
+        self._action_log = ft.TextField(
+            multiline=True,
+            read_only=True,
+            expand=True,
+            min_lines=8,
         )
-        self._box.add(title)
 
-        world_label = toga.Label(
-            f"World: {self._zworld.title}",
-            style=Pack(padding_bottom=10),
+        self._prompt_input = ft.TextField(
+            multiline=True,
+            expand=True,
+            hint_text="Describe the kind of experience you want...",
         )
-        self._box.add(world_label)
 
-        prompt_label = toga.Label(
-            "Player Prompt (optional):",
-            style=Pack(padding_bottom=5),
-        )
-        self._box.add(prompt_label)
-
-        self._prompt_input = toga.MultilineTextInput(
-            style=Pack(flex=1, padding_bottom=10),
-            placeholder="Describe the kind of experience you want...",
-        )
-        self._box.add(self._prompt_input)
-
-        self._generate_btn = toga.Button(
+        self._generate_btn = ft.ElevatedButton(
             "Generate",
-            on_press=self._on_generate,
-            style=Pack(padding_bottom=5),
+            on_click=self._on_generate,
         )
-        self._box.add(self._generate_btn)
 
-        back_btn = toga.Button(
-            "Back",
-            on_press=self._on_back,
-            style=Pack(padding_bottom=5),
+        self._root = ft.Column(
+            [
+                ft.Text("Generate Experience", size=16, weight=ft.FontWeight.BOLD),
+                ft.Text(f"World: {self._zworld.title}"),
+                ft.Text("Player Prompt (optional):"),
+                self._prompt_input,
+                self._generate_btn,
+                ft.ElevatedButton("Back", on_click=self._on_back),
+                self._progress_label,
+                self._rationale_label,
+                self._action_log,
+            ],
+            spacing=10,
+            expand=True,
+            scroll=ft.ScrollMode.AUTO,
         )
-        self._box.add(back_btn)
-        self._box.add(self._progress_label)
-        self._box.add(self._rationale_label)
-        self._box.add(self._action_log)
+        return self._root
 
-    def _on_generate(self, widget) -> None:
-        self._generate_btn.enabled = False
-        self._progress_label.text = "Starting experience generation..."
+    def _on_generate(self, e: ft.ControlEvent) -> None:
+        self._generate_btn.disabled = True
+        self._progress_label.value = "Starting experience generation..."
+        self._page.update()
         prompt = self._prompt_input.value.strip() or None
-        # Schedule background generation and attach a done callback so
-        # exceptions don't vanish silently — they will be logged to the
-        # application console for easier debugging.
-        task = asyncio.ensure_future(self._run_generation(prompt))
-
-        log = logging.getLogger(__name__)
-
-        def _on_done(t):
-            try:
-                _ = t.result()
-            except Exception:
-                log.exception("Experience generation task failed")
-
-        task.add_done_callback(_on_done)
-        # Also print immediately so the console definitely shows activity
-        print("_on_generate: scheduled background generation task for world=", self._zworld.slug, "prompt=", prompt)
+        log.info("_on_generate: scheduling generation for world=%r prompt=%r", self._zworld.slug, prompt)
+        self._page.run_task(self._run_generation, prompt)
 
     async def _run_generation(self, player_prompt: str | None) -> None:
-        print("_run_generation: ENTERED world=", self._zworld.slug, "prompt=", player_prompt)
-        log.info("_run_generation: ENTERED  world=%r prompt=%r", self._zworld.slug, player_prompt)
+        log.info("_run_generation: ENTERED world=%r prompt=%r", self._zworld.slug, player_prompt)
         mgr = self._state.zforge_manager
         if mgr is None:
-            self._progress_label.text = "Error: Not initialized."
+            self._progress_label.value = "Error: Not initialized."
+            self._page.update()
             return
 
         def on_update(msg: str) -> None:
-            self._progress_label.text = msg
+            self._progress_label.value = msg
+            self._page.update()
 
         try:
             log.info("_run_generation: calling start_experience_generation")
@@ -132,29 +105,30 @@ class GenerateExperienceScreen:
 
             if experience is not None:
                 self._last_experience = experience
-                self._progress_label.text = "Experience created! Play now?"
-                play_btn = toga.Button(
+                self._progress_label.value = "Experience created! Play now?"
+                play_btn = ft.ElevatedButton(
                     "Play Now",
-                    on_press=self._on_play,
-                    style=Pack(padding_top=5),
+                    on_click=self._on_play,
                 )
-                self._box.add(play_btn)
+                self._root.controls.append(play_btn)
+                self._page.update()
             else:
-                self._progress_label.text = "Experience generation failed."
-                self._generate_btn.enabled = True
+                self._progress_label.value = "Experience generation failed."
+                self._generate_btn.disabled = False
+                self._page.update()
         except Exception as exc:
-            self._progress_label.text = f"Failed: {exc}"
-            self._generate_btn.enabled = True
+            log.exception("Experience generation task failed")
+            self._progress_label.value = f"Failed: {exc}"
+            self._generate_btn.disabled = False
+            self._page.update()
 
-    def _on_play(self, widget) -> None:
+    def _on_play(self, e: ft.ControlEvent) -> None:
+        from zforge.app import navigate
         from zforge.ui.screens.gameplay_screen import GameplayScreen
-        screen = GameplayScreen(self._app, self._state, experience=self._last_experience)
-        self._app.main_window.content = screen.box
 
-    def _on_back(self, widget) -> None:
+        screen = GameplayScreen(self._page, self._state, experience=self._last_experience)
+        navigate(self._page, screen.build())
+
+    def _on_back(self, e: ft.ControlEvent) -> None:
         if self._on_done:
             self._on_done()
-
-    @property
-    def box(self) -> toga.Box:
-        return self._box

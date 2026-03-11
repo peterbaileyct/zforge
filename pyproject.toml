@@ -9,7 +9,7 @@ description = "Z-Forge: AI-powered Interactive Fiction creation tool."
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = [
-    "toga>=0.4",
+    "flet>=0.24",
     "langgraph>=0.2",
     "langchain>=0.3",
     "langchain-core>=0.3",
@@ -37,39 +37,6 @@ dev = [
 
 [project.scripts]
 zforge = "zforge.__main__:main"
-
-[tool.briefcase]
-project_name = "Z-Forge"
-bundle = "org.zforge"
-version = "0.1.0"
-url = "https://github.com/zforge/zforge"
-license.file = "LICENSE"
-author = "Z-Forge Contributors"
-
-[tool.briefcase.app.zforge]
-formal_name = "Z-Forge"
-description = "AI-powered Interactive Fiction creation tool."
-sources = ["src/zforge"]
-requires = [
-    "toga>=0.4",
-    "langgraph>=0.2",
-    "langchain>=0.3",
-    "langchain-core>=0.3",
-    "langchain-openai>=0.2",
-    "langchain-google-genai>=2.0",
-    "langchain-anthropic>=0.3",
-    "langchain-groq>=0.2",
-    "langchain-community>=0.3",
-    "langchain-experimental>=0.3",
-    "quickjs>=1.19",
-    "keyring>=25.0",
-    "platformdirs>=4.0",
-    "mcp>=1.0",
-    "lancedb>=0.3",
-    "kuzu>=0.4",
-    "llama-cpp-python>=0.2",
-    "mwparserfromhell>=0.6",
-]
 
 [tool.setuptools.packages.find]
 where = ["src"]

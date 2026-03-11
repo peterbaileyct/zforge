@@ -1,6 +1,6 @@
-"""Z-Forge BeeWare Application.
+"""Z-Forge Flet Application.
 
-ZForgeApp(toga.App) — startup flow: load config, check local model files,
+async main(page) — startup flow: load config, check local model files,
 show LLM config screen if missing or home screen if ready.
 
 Implements: src/zforge/app.py per docs/User Experience.md.
@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-import toga
+import flet as ft
 
 log = logging.getLogger(__name__)
 
@@ -32,141 +32,154 @@ from zforge.services.llm.llama_cpp_connector import LlamaCppConnector
 from zforge.services.llm.openai_connector import OpenAiConnector
 
 
-class ZForgeApp(toga.App):
-    """Main Z-Forge application."""
+def navigate(page: ft.Page, control: ft.Control) -> None:
+    """Replace the current screen with *control*."""
+    page.controls.clear()
+    page.controls.append(control)
+    page.update()
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._app_state = AppState()
 
-    def startup(self) -> None:
-        self.main_window = toga.MainWindow(title=self.formal_name)
+async def _prewarm_if_engine(if_engine: InkEngineConnector) -> None:
+    """Initialize IF engine eagerly so it's ready by the time the user generates."""
+    log.info("_prewarm_if_engine: starting InkEngineConnector initialization")
+    try:
+        await if_engine.initialize()
+        log.info("_prewarm_if_engine: InkEngineConnector ready")
+    except Exception:
+        log.exception("_prewarm_if_engine: initialization failed")
 
-        # Initialize services
-        config_service = ConfigService()
-        config_exists = config_service.exists()
-        has_llm_config = config_service.has_llm_config()
-        config = config_service.load()
 
-        self._app_state.config_service = config_service
+async def _prewarm_llm(llm_connector: LlamaCppConnector) -> None:
+    """Load the LLM in a background thread so it is cached before first use."""
+    log.info("_prewarm_llm: loading LLM model in background thread")
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, llm_connector.get_model)
+        log.info("_prewarm_llm: LLM model ready")
+    except Exception:
+        log.exception("_prewarm_llm: LLM model load failed")
 
-        # Initialize LLM connector registry with all available connectors
-        registry = ConnectorRegistry()
 
-        # Local connector (llama.cpp)
-        llm_connector = LlamaCppConnector(
-            model_path=config.chat_model_path,
-            context_size=config.chat_context_size,
-            gpu_layers=config.chat_gpu_layers,
-        )
-        registry.register(llm_connector)
+async def _prewarm_embedding(embedding_connector: LlamaCppEmbeddingConnector) -> None:
+    """Load the embedding model in a background thread so it is cached before first use."""
+    log.info("_prewarm_embedding: loading embedding model in background thread")
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, embedding_connector.get_embeddings)
+        log.info("_prewarm_embedding: embedding model ready")
+    except Exception:
+        log.exception("_prewarm_embedding: embedding model load failed")
 
-        # Remote connectors — load credentials from keyring
-        openai_connector = OpenAiConnector()
-        openai_connector.load_from_keyring()
-        registry.register(openai_connector)
 
-        google_connector = GoogleConnector()
-        google_connector.load_from_keyring()
-        registry.register(google_connector)
+def _show_home(page: ft.Page, app_state: AppState) -> None:
+    from zforge.ui.screens.home_screen import HomeScreen
 
-        anthropic_connector = AnthropicConnector()
-        anthropic_connector.load_from_keyring()
-        registry.register(anthropic_connector)
+    screen = HomeScreen(page, app_state)
+    navigate(page, screen.build())
+    screen.refresh()
 
-        groq_connector = GroqConnector()
-        groq_connector.load_from_keyring()
-        registry.register(groq_connector)
 
-        # OpenAI is the default provider for world generation
-        registry.set_default("OpenAI")
+def _show_llm_config(
+    page: ft.Page,
+    app_state: AppState,
+    *,
+    show_no_config_message: bool = False,
+) -> None:
+    from zforge.ui.screens.llm_config_screen import LlmConfigScreen
 
-        self._app_state.llm_connector = llm_connector
-        self._app_state.connector_registry = registry
+    screen = LlmConfigScreen(
+        page,
+        app_state,
+        on_done=lambda: _show_home(page, app_state),
+        show_no_config_message=show_no_config_message,
+    )
+    navigate(page, screen.build())
 
-        # Initialize embedding connector
-        embedding_connector = LlamaCppEmbeddingConnector(
-            model_path=config.embedding_model_path,
-            context_size=config.embedding_context_size,
-            gpu_layers=config.embedding_gpu_layers,
-        )
-        self._app_state.embedding_connector = embedding_connector
 
-        # Initialize IF engine connector and pre-warm in background
-        if_engine = InkEngineConnector()
-        self._app_state.if_engine_connector = if_engine
-        asyncio.ensure_future(self._prewarm_if_engine(if_engine))
+async def main(page: ft.Page) -> None:
+    """Flet application entry point."""
+    page.title = "Z-Forge"
 
-        # Initialize managers
-        zworld_manager = ZWorldManager(config.bundles_root, embedding_connector)
-        experience_manager = ExperienceManager(
-            config.experience_folder, if_engine
-        )
-        zforge_manager = ZForgeManager(
-            zworld_manager=zworld_manager,
-            experience_manager=experience_manager,
-            llm_connector=llm_connector,
-            connector_registry=registry,
-            config=config,
-            if_engine_connector=if_engine,
-            embedding_connector=embedding_connector,
-        )
-        self._app_state.zforge_manager = zforge_manager
+    app_state = AppState()
 
-        # Show LLM config on first run (no file) or no llm_nodes section;
-        # also show if either local connector is broken.
-        if not config_exists or not has_llm_config:
-            self._show_llm_config(show_no_config_message=True)
-        elif llm_connector.validate() and embedding_connector.validate():
-            asyncio.ensure_future(self._prewarm_llm(llm_connector))
-            asyncio.ensure_future(self._prewarm_embedding(embedding_connector))
-            self._show_home()
-        else:
-            self._show_llm_config(show_no_config_message=False)
+    # Initialize services
+    config_service = ConfigService()
+    config_exists = config_service.exists()
+    has_llm_config = config_service.has_llm_config()
+    config = config_service.load()
 
-        self.main_window.show()
+    app_state.config_service = config_service
 
-    async def _prewarm_if_engine(self, if_engine: InkEngineConnector) -> None:
-        """Initialize IF engine eagerly in background so it's ready by the time the user generates."""
-        log.info("_prewarm_if_engine: starting InkEngineConnector initialization")
-        try:
-            await if_engine.initialize()
-            log.info("_prewarm_if_engine: InkEngineConnector ready")
-        except Exception:
-            log.exception("_prewarm_if_engine: initialization failed")
+    # Initialize LLM connector registry with all available connectors
+    registry = ConnectorRegistry()
 
-    async def _prewarm_llm(self, llm_connector) -> None:
-        """Load the LLM in a background thread so it is cached before first use."""
-        log.info("_prewarm_llm: loading LLM model in background thread")
-        try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, llm_connector.get_model)
-            log.info("_prewarm_llm: LLM model ready")
-        except Exception:
-            log.exception("_prewarm_llm: LLM model load failed")
+    # Local connector (llama.cpp)
+    llm_connector = LlamaCppConnector(
+        model_path=config.chat_model_path,
+        context_size=config.chat_context_size,
+        gpu_layers=config.chat_gpu_layers,
+    )
+    registry.register(llm_connector)
 
-    async def _prewarm_embedding(self, embedding_connector) -> None:
-        """Load the embedding model in a background thread so it is cached before first use."""
-        log.info("_prewarm_embedding: loading embedding model in background thread")
-        try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, embedding_connector.get_embeddings)
-            log.info("_prewarm_embedding: embedding model ready")
-        except Exception:
-            log.exception("_prewarm_embedding: embedding model load failed")
+    # Remote connectors — load credentials from keyring
+    openai_connector = OpenAiConnector()
+    openai_connector.load_from_keyring()
+    registry.register(openai_connector)
 
-    def _show_home(self) -> None:
-        from zforge.ui.screens.home_screen import HomeScreen
+    google_connector = GoogleConnector()
+    google_connector.load_from_keyring()
+    registry.register(google_connector)
 
-        screen = HomeScreen(self, self._app_state)
-        screen.refresh()
-        self.main_window.content = screen.box
+    anthropic_connector = AnthropicConnector()
+    anthropic_connector.load_from_keyring()
+    registry.register(anthropic_connector)
 
-    def _show_llm_config(self, show_no_config_message: bool = False) -> None:
-        from zforge.ui.screens.llm_config_screen import LlmConfigScreen
+    groq_connector = GroqConnector()
+    groq_connector.load_from_keyring()
+    registry.register(groq_connector)
 
-        screen = LlmConfigScreen(
-            self, self._app_state, on_done=self._show_home,
-            show_no_config_message=show_no_config_message,
-        )
-        self.main_window.content = screen.box
+    # OpenAI is the default provider for world generation
+    registry.set_default("OpenAI")
+
+    app_state.llm_connector = llm_connector
+    app_state.connector_registry = registry
+
+    # Initialize embedding connector
+    embedding_connector = LlamaCppEmbeddingConnector(
+        model_path=config.embedding_model_path,
+        context_size=config.embedding_context_size,
+        gpu_layers=config.embedding_gpu_layers,
+    )
+    app_state.embedding_connector = embedding_connector
+
+    # Initialize IF engine connector and pre-warm in background
+    if_engine = InkEngineConnector()
+    app_state.if_engine_connector = if_engine
+    page.run_task(_prewarm_if_engine, if_engine)
+
+    # Initialize managers
+    zworld_manager = ZWorldManager(config.bundles_root, embedding_connector)
+    experience_manager = ExperienceManager(
+        config.experience_folder, if_engine
+    )
+    zforge_manager = ZForgeManager(
+        zworld_manager=zworld_manager,
+        experience_manager=experience_manager,
+        llm_connector=llm_connector,
+        connector_registry=registry,
+        config=config,
+        if_engine_connector=if_engine,
+        embedding_connector=embedding_connector,
+    )
+    app_state.zforge_manager = zforge_manager
+
+    # Show LLM config on first run (no file) or no llm_nodes section;
+    # also show if either local connector is broken.
+    if not config_exists or not has_llm_config:
+        _show_llm_config(page, app_state, show_no_config_message=True)
+    elif llm_connector.validate() and embedding_connector.validate():
+        page.run_task(_prewarm_llm, llm_connector)
+        page.run_task(_prewarm_embedding, embedding_connector)
+        _show_home(page, app_state)
+    else:
+        _show_llm_config(page, app_state, show_no_config_message=False)

@@ -1,7 +1,10 @@
 # User Experience
 
 ## Main UI
-The user interface for ZForge is built with [BeeWare](https://beeware.org/) (Toga widget toolkit). On PC and Mac, a main application menu takes the user to basic functions like opening an experience or creating a world. On mobile/web, the same menu is accessible by a "hamburger" menu icon to the left of the main text input at the bottom of the main window.
+The user interface for ZForge is built with [Flet](https://flet.dev/) (Flutter-backed Python UI framework). On PC and Mac, a main application menu takes the user to basic functions like opening an experience or creating a world. On mobile/web, the same menu is accessible by a "hamburger" menu icon to the left of the main text input at the bottom of the main window.
+
+### Implementation
+Flet is declared as a dependency in `pyproject.toml` as `flet>=0.24`. The application is launched via `ft.app(target=main)` where `main` is an async function taking `page: ft.Page`. There is no separate `App` class; `page` is threaded through all screens. Navigation between screens is accomplished by clearing `page.controls` and calling `page.update()`. All event handlers may be `async`; background tasks use `page.run_task()` instead of `asyncio.ensure_future()`. The`toga.MainWindow` pattern is replaced by properties of `ft.Page` (e.g., `page.title`). See `src/zforge/app.py` and `src/zforge/__main__.py` for the entry point.
 
 ## Gameplay Interface
 When an ink experience has been started, the UI looks as follows:
@@ -119,7 +122,7 @@ If no experience is in progress:
  If progress within an experience has been saved, but that experience was not successfully completed before the last time Z-Forge was closed, the user will be asked if they want to continue {name of experience} at application start.
  In addition to their usual places in the main menu, buttons will appear offering the options to "Create World" and, if there is at least one ZWorld available, "Create Experience", and, if there is at least one experience available, "Start Experience" and, if there is at least one saved progress available within an experience, "Resume Experience".
 
-That same action row now keeps an "LLM Configuration" button in view so the user can reopen the model download/configuration workflow at any time; see [src/zforge/ui/screens/home_screen.py](src/zforge/ui/screens/home_screen.py#L58-L207).
+That same action row now keeps an "LLM Configuration" button in view so the user can reopen the model download/configuration workflow at any time; see [src/zforge/ui/screens/home_screen.py](src/zforge/ui/screens/home_screen.py).
 
 ## LLM Configuration
 LLM configuration is a crucial element of the [app config](Application%20Configuration.md). The user is able to specify the provider and model for each LLM node in each [Process](Processes.md). When viewing the LLM configuration screen, the user will see a display of Processes with their LLM Nodes; for each node, they can select a Provider (from among all available LLM Connectors) and a model (from among the models available for the chosen Connector). If no value, or an invalid value, already exists in the application config for a given node, it will be defaulted to the provider and model listed in the specification for that node of that Process. After the user updates the LLM configuration, the app will check that all required configuration values have been provided for all the selected providers across all nodes; if not, they will be prompted for these configuration values as defined in the LLM Connector Configuration section.
@@ -141,7 +144,7 @@ At application start, the configuration will be checked for completeness and val
 
 If a valid config file with an `llm_nodes` section already exists, the app validates the local connectors. If either local model file is missing, the LLM Configuration screen is shown without the "no config found" message. Otherwise, the home screen is shown and the local LLM is pre-warmed in the background.
 
-Implementation: `ConfigService.has_llm_config()` reads the raw JSON to check for a non-empty `llm_nodes` key ([src/zforge/services/config_service.py](src/zforge/services/config_service.py)); startup routing lives in `ZForgeApp.startup` ([src/zforge/app.py](src/zforge/app.py#L41-L120)).
+Implementation: `ConfigService.has_llm_config()` reads the raw JSON to check for a non-empty `llm_nodes` key ([src/zforge/services/config_service.py](src/zforge/services/config_service.py)); startup routing lives in the `main(page)` function in [src/zforge/app.py](src/zforge/app.py).
 
 ## World Details Screen
 When the user selects a world from the home screen, a **Details** button becomes enabled alongside the existing action buttons. Tapping it navigates to `WorldDetailsScreen`.

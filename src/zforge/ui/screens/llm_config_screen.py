@@ -20,11 +20,9 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+import flet as ft
 import keyring
-import toga
 from platformdirs import user_data_dir
-from toga.style import Pack
-from toga.style.pack import COLUMN, ROW
 
 from zforge.models.model_catalogue import CATALOGUE, ModelCatalogueEntry
 from zforge.models.process_config import PROCESSES, REMOTE_CONNECTOR_KEYS
@@ -45,106 +43,86 @@ def _format_size(size_bytes: int) -> str:
     return f"~{size_bytes / 1_048_576:.0f} MB"
 
 
-def _section_label(text: str) -> toga.Label:
-    return toga.Label(
-        text,
-        style=Pack(padding_top=14, padding_bottom=4, font_size=14, font_weight="bold"),
-    )
-
-
-def _sub_label(text: str, **kwargs) -> toga.Label:
-    return toga.Label(text, style=Pack(**kwargs))
-
-
 class LlmConfigScreen:
     """Full LLM configuration screen (node config + provider keys + local model download)."""
 
     def __init__(
         self,
-        app: toga.App,
+        page: ft.Page,
         app_state: "AppState",
         on_done: Callable[[], None] | None = None,
         show_no_config_message: bool = False,
     ) -> None:
-        self._app = app
+        self._page = page
         self._state = app_state
         self._on_done = on_done
         self._show_no_config_message = show_no_config_message
 
-        # (process_slug, node_slug) → {"provider_sel": Selection, "model_sel": Selection}
-        self._node_rows: dict[tuple[str, str], dict[str, toga.Selection]] = {}
-        # connector_name → TextInput (API key)
-        self._api_key_inputs: dict[str, toga.TextInput] = {}
+        # (process_slug, node_slug) → {"provider_sel": Dropdown, "model_sel": Dropdown}
+        self._node_rows: dict[tuple[str, str], dict[str, ft.Dropdown]] = {}
+        # connector_name → TextField (API key)
+        self._api_key_inputs: dict[str, ft.TextField] = {}
 
         self._chat_entries = [e for e in CATALOGUE if e.role == "chat"]
         self._embedding_entry: ModelCatalogueEntry = next(
             e for e in CATALOGUE if e.role == "embedding" and e.is_default
         )
-        self._chat_sel: toga.Selection | None = None
-        self._size_label: toga.Label | None = None
-        self._download_btn: toga.Button | None = None
-        self._chat_bar: toga.ProgressBar | None = None
-        self._embed_bar: toga.ProgressBar | None = None
-        self._chat_bar_label: toga.Label | None = None
-        self._embed_bar_label: toga.Label | None = None
-        self._download_status_label: toga.Label | None = None
-        self._chunk_size_input: toga.TextInput | None = None
-        self._chunk_overlap_pct_input: toga.TextInput | None = None
+        self._chat_sel: ft.Dropdown | None = None
+        self._size_label: ft.Text | None = None
+        self._download_btn: ft.ElevatedButton | None = None
+        self._chat_bar: ft.ProgressBar | None = None
+        self._embed_bar: ft.ProgressBar | None = None
+        self._chat_bar_label: ft.Text | None = None
+        self._embed_bar_label: ft.Text | None = None
+        self._download_status_label: ft.Text | None = None
+        self._chunk_size_input: ft.TextField | None = None
+        self._chunk_overlap_pct_input: ft.TextField | None = None
+        self._retrieval_chunk_size_input: ft.TextField | None = None
+        self._retrieval_chunk_overlap_pct_input: ft.TextField | None = None
 
-        self._outer = toga.Box(style=Pack(direction=COLUMN, padding=10))
-        self._scroll = toga.ScrollContainer(
-            content=self._outer,
-            style=Pack(flex=1),
+    def build(self) -> ft.Control:
+        controls: list[ft.Control] = []
+
+        controls.append(ft.Text("LLM Configuration", size=18, weight=ft.FontWeight.BOLD))
+
+        if self._show_no_config_message:
+            controls.append(
+                ft.Text(
+                    "No LLM configuration was found. Configure below or press "
+                    "\"Use Defaults\" to proceed with default provider settings.",
+                )
+            )
+
+        controls.extend(self._build_node_section())
+        controls.extend(self._build_provider_section())
+        controls.extend(self._build_local_model_section())
+        controls.extend(self._build_parsing_section())
+        controls.extend(self._build_button_row())
+
+        return ft.Column(
+            controls,
+            spacing=6,
+            expand=True,
+            scroll=ft.ScrollMode.AUTO,
         )
-        self._root = toga.Box(style=Pack(direction=COLUMN))
-        self._root.add(self._scroll)
-        self._build_ui()
 
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
 
-    def _build_ui(self) -> None:
-        self._outer.add(
-            toga.Label(
-                "LLM Configuration",
-                style=Pack(padding_bottom=6, font_size=18, font_weight="bold"),
-            )
-        )
-
-        if self._show_no_config_message:
-            self._outer.add(
-                toga.Label(
-                    "No LLM configuration was found. Configure below or press "
-                    "\"Use Defaults\" to proceed with default provider settings.",
-                    style=Pack(padding_bottom=8),
-                )
-            )
-
-        self._build_node_section()
-        self._build_provider_section()
-        self._build_local_model_section()
-        self._build_parsing_section()
-        self._build_button_row()
-
-    def _build_node_section(self) -> None:
+    def _build_node_section(self) -> list[ft.Control]:
         registry = self._state.connector_registry
         config_service = self._state.config_service
         config = config_service.load() if config_service else None
         providers = registry.list_names() if registry else []
 
-        self._outer.add(_section_label("Node Configuration"))
-        self._outer.add(
-            _sub_label(
-                "Select the provider and model for each process node.",
-                padding_bottom=6,
-            )
-        )
+        controls: list[ft.Control] = [
+            ft.Text("Node Configuration", size=14, weight=ft.FontWeight.BOLD),
+            ft.Text("Select the provider and model for each process node."),
+        ]
 
         for proc in PROCESSES:
-            self._outer.add(
-                _sub_label(proc.display, font_weight="bold", padding_top=6, padding_bottom=2)
-            )
+            controls.append(ft.Text(proc.display, weight=ft.FontWeight.BOLD))
             for node in proc.nodes:
                 saved_cfg = (
                     config.llm_nodes.get(proc.slug, {}).get(node.slug)
@@ -164,230 +142,182 @@ class LlmConfigScreen:
                     else (available_models[0] if available_models else "")
                 )
 
-                row_box = toga.Box(style=Pack(direction=ROW, padding_bottom=4))
-                row_box.add(toga.Label(f"  {node.display}", style=Pack(width=100, padding_right=8)))
-
                 ps, ns = proc.slug, node.slug
-                provider_sel = toga.Selection(
-                    items=providers,
-                    value=init_provider if providers else None,
-                    on_change=lambda w, ps=ps, ns=ns: self._on_provider_change(ps, ns, w),
-                    style=Pack(width=160, padding_right=8),
+                provider_sel = ft.Dropdown(
+                    options=[ft.dropdown.Option(p) for p in providers],
+                    value=init_provider if init_provider in providers else None,
+                    on_change=lambda e, ps=ps, ns=ns: self._on_provider_change(ps, ns, e),
+                    width=180,
                 )
-                model_sel = toga.Selection(
-                    items=available_models,
-                    value=init_model if available_models else None,
-                    style=Pack(width=240),
+                model_sel = ft.Dropdown(
+                    options=[ft.dropdown.Option(m) for m in available_models],
+                    value=init_model if init_model in available_models else None,
+                    width=260,
                 )
-                row_box.add(provider_sel)
-                row_box.add(model_sel)
-                self._outer.add(row_box)
+                controls.append(
+                    ft.Row([ft.Text(f"  {node.display}", width=120), provider_sel, model_sel])
+                )
                 self._node_rows[(ps, ns)] = {"provider_sel": provider_sel, "model_sel": model_sel}
 
-    def _build_provider_section(self) -> None:
-        self._outer.add(_section_label("Provider Configuration"))
-        self._outer.add(
-            _sub_label(
-                "Enter API keys for remote providers. Leave blank if you are not using that provider.",
-                padding_bottom=6,
-            )
-        )
+        return controls
+
+    def _build_provider_section(self) -> list[ft.Control]:
+        controls: list[ft.Control] = [
+            ft.Text("Provider Configuration", size=14, weight=ft.FontWeight.BOLD),
+            ft.Text("Enter API keys for remote providers. Leave blank if you are not using that provider."),
+        ]
 
         for name, (svc, key) in REMOTE_CONNECTOR_KEYS.items():
             current_value = keyring.get_password(svc, key) or ""
-            row_box = toga.Box(style=Pack(direction=ROW, padding_bottom=4, flex=1))
-            row_box.add(toga.Label(f"  {name}", style=Pack(width=100, padding_right=8)))
-            row_box.add(toga.Label("API Key:", style=Pack(padding_right=6)))
-            text_input = toga.TextInput(
+            text_input = ft.TextField(
                 value=current_value,
-                placeholder="(not set)",
-                style=Pack(flex=1),
+                hint_text="(not set)",
+                expand=True,
             )
-            row_box.add(text_input)
-            self._outer.add(row_box)
+            controls.append(
+                ft.Row([ft.Text(f"  {name}", width=120), ft.Text("API Key:"), text_input])
+            )
             self._api_key_inputs[name] = text_input
 
-    def _build_local_model_section(self) -> None:
-        self._outer.add(_section_label("Local Model"))
-        self._outer.add(
-            _sub_label(
+        return controls
+
+    def _build_local_model_section(self) -> list[ft.Control]:
+        controls: list[ft.Control] = [
+            ft.Text("Local Model", size=14, weight=ft.FontWeight.BOLD),
+            ft.Text(
                 "Select and download a local GGUF chat model. "
-                "The embedding model is always included.",
-                padding_bottom=6,
-            )
-        )
+                "The embedding model is always included."
+            ),
+        ]
 
         default_name = next(
             (e.display_name for e in self._chat_entries if e.is_default),
             self._chat_entries[0].display_name if self._chat_entries else "",
         )
-        self._chat_sel = toga.Selection(
-            items=[e.display_name for e in self._chat_entries],
+        self._chat_sel = ft.Dropdown(
+            options=[ft.dropdown.Option(e.display_name) for e in self._chat_entries],
             value=default_name,
             on_change=self._update_size_label,
-            style=Pack(padding_bottom=4),
         )
-        self._outer.add(self._chat_sel)
+        controls.append(self._chat_sel)
 
-        self._size_label = toga.Label("", style=Pack(padding_bottom=6))
-        self._outer.add(self._size_label)
+        self._size_label = ft.Text("")
+        controls.append(self._size_label)
         self._update_size_label()
 
-        self._download_btn = toga.Button(
-            "Download",
-            on_press=self._on_download,
-            style=Pack(padding_bottom=8),
+        self._download_btn = ft.ElevatedButton(
+            "Download", on_click=self._on_download
         )
-        self._outer.add(self._download_btn)
+        controls.append(self._download_btn)
 
-        self._chat_bar_label = toga.Label("", style=Pack(padding_top=2))
-        self._outer.add(self._chat_bar_label)
-        self._chat_bar = toga.ProgressBar(max=1.0, style=Pack(padding_bottom=4, flex=1))
-        self._chat_bar.value = 0.0
-        self._outer.add(self._chat_bar)
+        self._chat_bar_label = ft.Text("")
+        controls.append(self._chat_bar_label)
+        self._chat_bar = ft.ProgressBar(value=0, expand=True)
+        controls.append(self._chat_bar)
 
-        self._embed_bar_label = toga.Label("", style=Pack(padding_top=2))
-        self._outer.add(self._embed_bar_label)
-        self._embed_bar = toga.ProgressBar(max=1.0, style=Pack(padding_bottom=4, flex=1))
-        self._embed_bar.value = 0.0
-        self._outer.add(self._embed_bar)
+        self._embed_bar_label = ft.Text("")
+        controls.append(self._embed_bar_label)
+        self._embed_bar = ft.ProgressBar(value=0, expand=True)
+        controls.append(self._embed_bar)
 
-        self._download_status_label = toga.Label("", style=Pack(padding_top=4))
-        self._outer.add(self._download_status_label)
+        self._download_status_label = ft.Text("")
+        controls.append(self._download_status_label)
 
-    def _build_parsing_section(self) -> None:
+        return controls
+
+    def _build_parsing_section(self) -> list[ft.Control]:
         config_service = self._state.config_service
         config = config_service.load() if config_service else None
         chunk_size = config.parsing_chunk_size if config else 10000
         chunk_overlap = config.parsing_chunk_overlap if config else 500
         overlap_pct = round(chunk_overlap / chunk_size * 100) if chunk_size else 5
 
-        self._outer.add(_section_label("Parsing Pipeline"))
-        self._outer.add(
-            _sub_label(
-                "Controls how source documents are split before LLM processing.",
-                padding_bottom=6,
-            )
-        )
-
-        size_row = toga.Box(style=Pack(direction=ROW, padding_bottom=6, alignment="center"))
-        size_row.add(toga.Label("Chunk size:", style=Pack(width=140, padding_right=8)))
-        self._chunk_size_input = toga.TextInput(
-            value=str(chunk_size),
-            style=Pack(width=100, padding_right=6),
-        )
-        size_row.add(self._chunk_size_input)
-        size_row.add(toga.Label("characters", style=Pack()))
-        self._outer.add(size_row)
-
-        overlap_row = toga.Box(style=Pack(direction=ROW, padding_bottom=6, alignment="center"))
-        overlap_row.add(toga.Label("Chunk overlap:", style=Pack(width=140, padding_right=8)))
-        self._chunk_overlap_pct_input = toga.TextInput(
-            value=str(overlap_pct),
-            style=Pack(width=60, padding_right=6),
-        )
-        overlap_row.add(self._chunk_overlap_pct_input)
-        overlap_row.add(toga.Label("% of chunk size", style=Pack()))
-        self._outer.add(overlap_row)
-
-        # --- Retrieval split (vector store) ---
-        self._outer.add(
-            _sub_label(
-                "Retrieval split: each context chunk is re-split to the size below for the vector store.",
-                padding_top=6,
-                padding_bottom=4,
-            )
-        )
+        self._chunk_size_input = ft.TextField(value=str(chunk_size), width=100)
+        self._chunk_overlap_pct_input = ft.TextField(value=str(overlap_pct), width=60)
 
         retrieval_size = config.parsing_retrieval_chunk_size if config else 500
         retrieval_overlap_abs = config.parsing_retrieval_chunk_overlap if config else 50
         retrieval_overlap_pct = round(retrieval_overlap_abs / retrieval_size * 100) if retrieval_size else 10
 
-        retrieval_size_row = toga.Box(style=Pack(direction=ROW, padding_bottom=6, alignment="center"))
-        retrieval_size_row.add(toga.Label("Retrieval chunk size:", style=Pack(width=140, padding_right=8)))
-        self._retrieval_chunk_size_input = toga.TextInput(
-            value=str(retrieval_size),
-            style=Pack(width=100, padding_right=6),
-        )
-        retrieval_size_row.add(self._retrieval_chunk_size_input)
-        retrieval_size_row.add(toga.Label("characters", style=Pack()))
-        self._outer.add(retrieval_size_row)
+        self._retrieval_chunk_size_input = ft.TextField(value=str(retrieval_size), width=100)
+        self._retrieval_chunk_overlap_pct_input = ft.TextField(value=str(retrieval_overlap_pct), width=60)
 
-        retrieval_overlap_row = toga.Box(style=Pack(direction=ROW, padding_bottom=6, alignment="center"))
-        retrieval_overlap_row.add(toga.Label("Retrieval overlap:", style=Pack(width=140, padding_right=8)))
-        self._retrieval_chunk_overlap_pct_input = toga.TextInput(
-            value=str(retrieval_overlap_pct),
-            style=Pack(width=60, padding_right=6),
-        )
-        retrieval_overlap_row.add(self._retrieval_chunk_overlap_pct_input)
-        retrieval_overlap_row.add(toga.Label("% of retrieval chunk size", style=Pack()))
-        self._outer.add(retrieval_overlap_row)
+        return [
+            ft.Text("Parsing Pipeline", size=14, weight=ft.FontWeight.BOLD),
+            ft.Text("Controls how source documents are split before LLM processing."),
+            ft.Row([ft.Text("Chunk size:", width=160), self._chunk_size_input, ft.Text("characters")]),
+            ft.Row([ft.Text("Chunk overlap:", width=160), self._chunk_overlap_pct_input, ft.Text("% of chunk size")]),
+            ft.Text(
+                "Retrieval split: each context chunk is re-split to the size below for the vector store.",
+            ),
+            ft.Row([ft.Text("Retrieval chunk size:", width=160), self._retrieval_chunk_size_input, ft.Text("characters")]),
+            ft.Row([ft.Text("Retrieval overlap:", width=160), self._retrieval_chunk_overlap_pct_input, ft.Text("% of retrieval chunk size")]),
+        ]
 
-    def _build_button_row(self) -> None:
-        btn_row = toga.Box(style=Pack(direction=ROW, padding_top=14, padding_bottom=10))
-        btn_row.add(
-            toga.Button(
-                "Use Defaults",
-                on_press=self._on_use_defaults,
-                style=Pack(padding_right=10),
-            )
-        )
-        btn_row.add(toga.Button("Save", on_press=self._on_save))
-        self._outer.add(btn_row)
+    def _build_button_row(self) -> list[ft.Control]:
+        return [
+            ft.Row([
+                ft.ElevatedButton("Use Defaults", on_click=self._on_use_defaults),
+                ft.ElevatedButton("Save", on_click=self._on_save),
+            ]),
+        ]
 
     # ------------------------------------------------------------------
     # Event handlers
     # ------------------------------------------------------------------
 
-    def _on_provider_change(self, process_slug: str, node_slug: str, widget) -> None:
+    def _on_provider_change(self, process_slug: str, node_slug: str, e: ft.ControlEvent) -> None:
         """Refresh the model list when a node's provider changes."""
         row = self._node_rows.get((process_slug, node_slug))
         if row is None:
             return
-        provider = widget.value
+        provider = e.control.value
         registry = self._state.connector_registry
         connector = registry.get(provider) if registry and provider else None
         models = connector.get_available_models() if connector else []
         model_sel = row["model_sel"]
-        model_sel.items = models
-        if models:
-            model_sel.value = models[0]
+        model_sel.options = [ft.dropdown.Option(m) for m in models]
+        model_sel.value = models[0] if models else None
+        self._page.update()
 
-    def _update_size_label(self, widget=None) -> None:
+    def _update_size_label(self, e: ft.ControlEvent | None = None) -> None:
         if self._size_label is None or self._chat_sel is None:
             return
         chat = self._selected_chat_entry()
         total = chat.size_bytes_approx + self._embedding_entry.size_bytes_approx
-        self._size_label.text = (
+        self._size_label.value = (
             f"Total download: {_format_size(total)}"
             f" (chat {_format_size(chat.size_bytes_approx)}"
             f" + embedding {_format_size(self._embedding_entry.size_bytes_approx)})"
         )
+        if e is not None:
+            self._page.update()
 
     def _selected_chat_entry(self) -> ModelCatalogueEntry:
         if self._chat_sel is None:
             return self._chat_entries[0]
         name = self._chat_sel.value
-        for e in self._chat_entries:
-            if e.display_name == name:
-                return e
+        for entry in self._chat_entries:
+            if entry.display_name == name:
+                return entry
         return self._chat_entries[0]
 
-    def _on_download(self, widget) -> None:
-        asyncio.ensure_future(self._run_downloads())
+    def _on_download(self, e: ft.ControlEvent) -> None:
+        self._page.run_task(self._run_downloads)
 
     async def _run_downloads(self) -> None:
         chat_entry = self._selected_chat_entry()
         if self._chat_sel:
-            self._chat_sel.enabled = False
+            self._chat_sel.disabled = True
         if self._download_btn:
-            self._download_btn.enabled = False
+            self._download_btn.disabled = True
         if self._download_status_label:
-            self._download_status_label.text = "Downloading models…"
+            self._download_status_label.value = "Downloading models…"
         if self._chat_bar_label:
-            self._chat_bar_label.text = chat_entry.filename
+            self._chat_bar_label.value = chat_entry.filename
         if self._embed_bar_label:
-            self._embed_bar_label.text = self._embedding_entry.filename
+            self._embed_bar_label.value = self._embedding_entry.filename
+        self._page.update()
 
         dest_dir = Path(user_data_dir("zforge")) / _MODELS_SUBDIR
         service = ModelDownloadService()
@@ -395,10 +325,12 @@ class LlmConfigScreen:
         def _chat_progress(filename: str, received: int, total: int) -> None:
             if self._chat_bar and total > 0:
                 self._chat_bar.value = received / total
+                self._page.update()
 
         def _embed_progress(filename: str, received: int, total: int) -> None:
             if self._embed_bar and total > 0:
                 self._embed_bar.value = received / total
+                self._page.update()
 
         try:
             await asyncio.gather(
@@ -430,7 +362,8 @@ class LlmConfigScreen:
                 )
 
             if self._download_status_label:
-                self._download_status_label.text = "Download complete!"
+                self._download_status_label.value = "Download complete!"
+            self._page.update()
 
             if self._on_done:
                 self._on_done()
@@ -438,20 +371,21 @@ class LlmConfigScreen:
         except Exception:
             log.exception("Model download failed")
             if self._download_status_label:
-                self._download_status_label.text = (
+                self._download_status_label.value = (
                     "Download failed. Check your internet connection and try again."
                 )
             if self._chat_sel:
-                self._chat_sel.enabled = True
+                self._chat_sel.disabled = False
             if self._download_btn:
-                self._download_btn.enabled = True
+                self._download_btn.disabled = False
+            self._page.update()
 
-    def _on_use_defaults(self, widget) -> None:
+    def _on_use_defaults(self, e: ft.ControlEvent) -> None:
         """Proceed without saving any changes."""
         if self._on_done:
             self._on_done()
 
-    def _on_save(self, widget) -> None:
+    def _on_save(self, e: ft.ControlEvent) -> None:
         """Persist node config + API keys then proceed."""
         config_service = self._state.config_service
         registry = self._state.connector_registry
@@ -506,9 +440,3 @@ class LlmConfigScreen:
 
         if self._on_done:
             self._on_done()
-
-    # ------------------------------------------------------------------
-
-    @property
-    def box(self) -> toga.Box:
-        return self._root

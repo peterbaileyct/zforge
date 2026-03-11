@@ -117,6 +117,33 @@ erDiagram
     ExperienceManager ||--o{ Experience : "manages"
 ```
 
+## UI Runtime
+
+The Flet `Page` object is the root of the UI. It holds a reference to `AppState`
+and navigates between screens by replacing `page.controls`.
+
+```mermaid
+erDiagram
+    FletPage {
+        string title "Z-Forge"
+    }
+    AppState {
+        ref zforgeManager
+        ref configService
+        ref llmConnector
+        ref connectorRegistry
+        ref ifEngineConnector
+        ref embeddingConnector
+    }
+    Screen {
+        string kind "home, llm_config, create_world, preferences, world_details, gameplay, generate_experience"
+    }
+
+    FletPage ||--|| AppState : "initializes and holds"
+    FletPage ||--o| Screen  : "displays one at a time"
+    Screen   }o--|| AppState : "reads / writes"
+```
+
 ## Transitory Process Models
 
 Process objects are not persisted but track multi-step LLM workflows. See [Managers, Processes, and MCP Server](Managers,%20Processes,%20and%20MCP%20Server.md) for tool implementation guidelines.

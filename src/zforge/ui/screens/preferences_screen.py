@@ -9,9 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Callable
 
-import toga
-from toga.style import Pack
-from toga.style.pack import COLUMN, ROW
+import flet as ft
 
 if TYPE_CHECKING:
     from zforge.app_state import AppState
@@ -35,72 +33,70 @@ class PreferencesScreen:
 
     def __init__(
         self,
-        app: toga.App,
+        page: ft.Page,
         app_state: AppState,
         on_done: Callable[[], None] | None = None,
     ) -> None:
-        self._app = app
+        self._page = page
         self._state = app_state
         self._on_done = on_done
-        self._sliders: dict[str, toga.Slider] = {}
-        self._slider_labels: dict[str, toga.Label] = {}
-        self._box = toga.Box(style=Pack(direction=COLUMN, padding=10))
-        self._build_ui()
+        self._sliders: dict[str, ft.Slider] = {}
+        self._slider_labels: dict[str, ft.Text] = {}
 
-    def _build_ui(self) -> None:
-        title = toga.Label(
-            "Player Preferences",
-            style=Pack(padding_bottom=10, font_size=16, font_weight="bold"),
-        )
-        self._box.add(title)
-
+    def build(self) -> ft.Control:
         config = self._state.config_service
         prefs = config.load().preferences if config else None
 
+        scale_controls: list[ft.Control] = []
         for field_name, label_text, hint in _SCALES:
-            row = toga.Box(style=Pack(direction=COLUMN, padding_bottom=10))
-            label = toga.Label(f"{label_text} ({hint}):", style=Pack())
-            row.add(label)
-
             current_val = getattr(prefs, field_name, 5) if prefs else 5
-            value_label = toga.Label(str(current_val), style=Pack(padding_left=5))
+            value_label = ft.Text(str(current_val))
             self._slider_labels[field_name] = value_label
 
-            slider = toga.Slider(
+            slider = ft.Slider(
                 min=1,
                 max=10,
                 value=current_val,
-                on_change=lambda widget, fn=field_name: self._on_slider_change(fn, widget),
-                style=Pack(flex=1),
+                divisions=9,
+                on_change=lambda e, fn=field_name: self._on_slider_change(fn, e),
+                expand=True,
             )
             self._sliders[field_name] = slider
 
-            slider_row = toga.Box(style=Pack(direction=ROW))
-            slider_row.add(slider)
-            slider_row.add(value_label)
-            row.add(slider_row)
-            self._box.add(row)
+            scale_controls.append(
+                ft.Column(
+                    [
+                        ft.Text(f"{label_text} ({hint}):"),
+                        ft.Row([slider, value_label]),
+                    ],
+                    spacing=4,
+                )
+            )
 
-        # General preferences free text
-        gen_label = toga.Label("General Preferences:", style=Pack(padding_top=5))
-        self._box.add(gen_label)
-        self._general_input = toga.MultilineTextInput(
-            style=Pack(flex=1, padding_bottom=10),
+        self._general_input = ft.TextField(
+            multiline=True,
+            expand=True,
             value=prefs.general_preferences if prefs else "",
         )
-        self._box.add(self._general_input)
 
-        save_btn = toga.Button(
-            "Save Preferences",
-            on_press=self._on_save,
-            style=Pack(padding_top=5),
+        return ft.Column(
+            [
+                ft.Text("Player Preferences", size=16, weight=ft.FontWeight.BOLD),
+                *scale_controls,
+                ft.Text("General Preferences:"),
+                self._general_input,
+                ft.ElevatedButton("Save Preferences", on_click=self._on_save),
+            ],
+            spacing=10,
+            expand=True,
+            scroll=ft.ScrollMode.AUTO,
         )
-        self._box.add(save_btn)
 
-    def _on_slider_change(self, field_name: str, widget) -> None:
-        self._slider_labels[field_name].text = str(int(widget.value))
+    def _on_slider_change(self, field_name: str, e: ft.ControlEvent) -> None:
+        self._slider_labels[field_name].value = str(int(e.control.value))
+        self._page.update()
 
-    def _on_save(self, widget) -> None:
+    def _on_save(self, e: ft.ControlEvent) -> None:
         config_svc = self._state.config_service
         if config_svc is None:
             return
@@ -117,7 +113,3 @@ class PreferencesScreen:
 
         if self._on_done:
             self._on_done()
-
-    @property
-    def box(self) -> toga.Box:
-        return self._box

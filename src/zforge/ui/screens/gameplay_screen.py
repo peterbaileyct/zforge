@@ -7,11 +7,12 @@ Implements: src/zforge/ui/screens/gameplay_screen.py per docs/User Experience.md
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING
 
-import toga
-from toga.style import Pack
-from toga.style.pack import CENTER, COLUMN, LEFT, RIGHT, ROW
+import flet as ft
+
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from zforge.app_state import AppState
@@ -23,144 +24,122 @@ class GameplayScreen:
 
     def __init__(
         self,
-        app: toga.App,
+        page: ft.Page,
         app_state: AppState,
         experience: Experience | None = None,
         resume: bool = False,
     ) -> None:
-        self._app = app
+        self._page = page
         self._state = app_state
         self._current_experience = experience
         self._resume = resume
-        self._box = toga.Box(style=Pack(direction=COLUMN, padding=10))
-        self._transcript = toga.MultilineTextInput(
-            readonly=True,
-            style=Pack(flex=1, padding=5, font_family="monospace"),
+
+    def build(self) -> ft.Control:
+        self._transcript = ft.TextField(
+            multiline=True,
+            read_only=True,
+            expand=True,
+            text_style=ft.TextStyle(font_family="monospace"),
         )
-        self._choices_box = toga.Box(
-            style=Pack(direction=COLUMN, padding=5)
+        self._choices_box = ft.Column([], spacing=2)
+
+        self._text_input = ft.TextField(
+            hint_text="Enter choice number or tap above",
+            expand=True,
+            on_submit=self._on_submit_input,
         )
-        self._build_ui()
-        # Show immediate UI feedback and start initialize in background
+
+        root = ft.Column(
+            [
+                self._transcript,
+                self._choices_box,
+                ft.Row([
+                    self._text_input,
+                    ft.ElevatedButton("↵", on_click=self._on_submit_input, width=50),
+                ]),
+                ft.Row([
+                    ft.ElevatedButton("Save", on_click=self._on_save),
+                    ft.ElevatedButton("Restore", on_click=self._on_restore),
+                    ft.ElevatedButton("Home", on_click=self._on_home),
+                ]),
+            ],
+            spacing=8,
+            expand=True,
+        )
+
         self._add_game_text("Loading experience...")
-        # Use a small delay to allow Toga to finish initial layout before we hammer the engine
-        async def _deferred_init():
-            await asyncio.sleep(0.1)
-            await self._initialize()
-        asyncio.ensure_future(_deferred_init())
+        self._page.run_task(self._deferred_init)
+        return root
 
-    def _build_ui(self) -> None:
-        # Transcript output area (wraps and self-scrolls)
-        self._box.add(self._transcript)
-
-        # Choice buttons
-        self._box.add(self._choices_box)
-
-        # Input row
-        input_row = toga.Box(style=Pack(direction=ROW, padding_top=5))
-        self._text_input = toga.TextInput(
-            placeholder="Enter choice number or tap above",
-            style=Pack(flex=1),
-            on_confirm=self._on_submit_input,
-        )
-        input_row.add(self._text_input)
-        submit_btn = toga.Button(
-            "↵",
-            on_press=self._on_submit_input,
-            style=Pack(padding_left=5, width=40),
-        )
-        input_row.add(submit_btn)
-        self._box.add(input_row)
-
-        # Menu buttons
-        menu_row = toga.Box(style=Pack(direction=ROW, padding_top=5))
-        save_btn = toga.Button(
-            "Save", on_press=self._on_save, style=Pack(padding=5)
-        )
-        menu_row.add(save_btn)
-        restore_btn = toga.Button(
-            "Restore", on_press=self._on_restore, style=Pack(padding=5)
-        )
-        menu_row.add(restore_btn)
-        home_btn = toga.Button(
-            "Home", on_press=self._on_home, style=Pack(padding=5)
-        )
-        menu_row.add(home_btn)
-        self._box.add(menu_row)
+    async def _deferred_init(self) -> None:
+        await asyncio.sleep(0.1)
+        await self._initialize()
 
     async def _initialize(self) -> None:
         """Load and start (or resume) the current experience."""
         if_engine = self._state.if_engine_connector
-        # Ensure engine is initialized (it's pre-warmed in background, but check here)
         if if_engine:
             try:
                 await if_engine.initialize()
             except Exception as e:
-                print(f"_initialize: Engine initialization check failed: {e}")
+                log.warning("_initialize: Engine initialization check failed: %s", e)
 
         mgr = self._state.zforge_manager
         exp = self._current_experience
-        print(f"_initialize: STARTING for experience={exp}")
-        
+        log.debug("_initialize: STARTING for experience=%s", exp)
+
         if if_engine is None or mgr is None or exp is None:
-            print(f"_initialize: ABORT - missing context: engine={if_engine}, mgr={mgr}, exp={exp}")
+            log.debug("_initialize: ABORT - missing context")
             self._add_game_text("No experience selected.")
             return
 
         compiled_data = mgr.experience_manager.load_experience(exp.zworld_id, exp.name)
         if compiled_data is None:
-            print(f"_initialize: ABORT - no file found for {exp.zworld_id}/{exp.name}")
+            log.debug("_initialize: ABORT - no file found for %s/%s", exp.zworld_id, exp.name)
             self._add_game_text("Could not load experience data.")
             return
 
         try:
             if self._resume and mgr.experience_manager.has_saved_progress(exp.zworld_id, exp.name):
                 saved = mgr.experience_manager.load_progress(exp.zworld_id, exp.name)
-                # Need to load the story first before restoring state
                 await if_engine.start_experience(compiled_data)
                 result = await if_engine.restore_state(saved)
-                print("_initialize: restore_state returned", result)
                 self._add_game_text(result.text)
                 self._show_choices(result.choices)
             else:
                 text = await if_engine.start_experience(compiled_data)
-                print("_initialize: start_experience returned text len=", len(text) if isinstance(text, str) else None)
                 state_choices = await if_engine.get_current_choices() if hasattr(if_engine, "get_current_choices") else []
-                print("_initialize: current choices=", state_choices)
                 self._add_game_text(text)
                 self._show_choices(state_choices or None)
         except Exception as exc:
-            import traceback
-            print("_initialize: CRITICAL EXCEPTION")
-            traceback.print_exc()
-            self._add_game_text(f"Error starting experience: {exc}")
-            # Log full stack trace for debugging if possible
             log.exception("Experience initialization failed")
+            self._add_game_text(f"Error starting experience: {exc}")
         finally:
-            print(f"_initialize: FINISHED for experience={exp}")
+            log.debug("_initialize: FINISHED for experience=%s", exp)
 
     def _add_game_text(self, text: str) -> None:
         """Append game output text to the transcript."""
         self._transcript.value = (self._transcript.value or "") + text.rstrip("\n") + "\n"
+        self._page.update()
 
     def _add_player_text(self, text: str) -> None:
         """Append player input text to the transcript (prefixed with '>>')."""
         self._transcript.value = (self._transcript.value or "") + f">> {text}\n"
+        self._page.update()
 
     def _show_choices(self, choices: list[str] | None) -> None:
         """Display choice buttons."""
-        self._choices_box.clear()
+        self._choices_box.controls.clear()
         if not choices:
+            self._page.update()
             return
         for i, choice_text in enumerate(choices):
-            btn = toga.Button(
+            btn = ft.ElevatedButton(
                 f"{i + 1}. {choice_text}",
-                on_press=lambda w, idx=i: asyncio.ensure_future(
-                    self._select_choice(idx)
-                ),
-                style=Pack(padding=2, text_align=LEFT),
+                on_click=lambda e, idx=i: self._page.run_task(self._select_choice, idx),
             )
-            self._choices_box.add(btn)
+            self._choices_box.controls.append(btn)
+        self._page.update()
 
     async def _select_choice(self, index: int) -> None:
         """Handle a choice selection."""
@@ -168,7 +147,6 @@ class GameplayScreen:
         if if_engine is None:
             return
 
-        # Show player's choice in output
         choices = await if_engine.get_current_choices() if hasattr(if_engine, 'get_current_choices') else []
         if index < len(choices):
             self._add_player_text(choices[index])
@@ -179,20 +157,22 @@ class GameplayScreen:
 
         if result.is_complete:
             self._add_game_text("\n— Experience Complete —")
-            self._choices_box.clear()
+            self._choices_box.controls.clear()
+            self._page.update()
 
-    def _on_submit_input(self, widget) -> None:
+    def _on_submit_input(self, e: ft.ControlEvent) -> None:
         text = self._text_input.value.strip()
         if text:
             self._text_input.value = ""
+            self._page.update()
             try:
                 index = int(text) - 1
-                asyncio.ensure_future(self._select_choice(index))
+                self._page.run_task(self._select_choice, index)
             except ValueError:
                 pass
 
-    def _on_save(self, widget) -> None:
-        asyncio.ensure_future(self._do_save())
+    def _on_save(self, e: ft.ControlEvent) -> None:
+        self._page.run_task(self._do_save)
 
     async def _do_save(self) -> None:
         if_engine = self._state.if_engine_connector
@@ -204,8 +184,8 @@ class GameplayScreen:
         mgr.experience_manager.save_progress(exp.zworld_id, exp.name, state_bytes)
         self._add_game_text("Progress saved.")
 
-    def _on_restore(self, widget) -> None:
-        asyncio.ensure_future(self._do_restore())
+    def _on_restore(self, e: ft.ControlEvent) -> None:
+        self._page.run_task(self._do_restore)
 
     async def _do_restore(self) -> None:
         if_engine = self._state.if_engine_connector
@@ -221,16 +201,10 @@ class GameplayScreen:
         else:
             self._add_game_text("No saved progress found.")
 
-    def _on_home(self, widget) -> None:
+    def _on_home(self, e: ft.ControlEvent) -> None:
+        from zforge.app import navigate
         from zforge.ui.screens.home_screen import HomeScreen
-        # Cancel any pending initialization tasks
-        for task in asyncio.all_tasks():
-            if "_initialize" in str(task.get_coro()):
-                task.cancel()
-        screen = HomeScreen(self._app, self._state)
-        screen.refresh()
-        self._app.main_window.content = screen.box
 
-    @property
-    def box(self) -> toga.Box:
-        return self._box
+        screen = HomeScreen(self._page, self._state)
+        navigate(self._page, screen.build())
+        screen.refresh()
