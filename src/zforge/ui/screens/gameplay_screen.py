@@ -43,7 +43,11 @@ class GameplayScreen:
         self._build_ui()
         # Show immediate UI feedback and start initialize in background
         self._add_game_text("Loading experience...")
-        asyncio.ensure_future(self._initialize())
+        # Use a small delay to allow Toga to finish initial layout before we hammer the engine
+        async def _deferred_init():
+            await asyncio.sleep(0.1)
+            await self._initialize()
+        asyncio.ensure_future(_deferred_init())
 
     def _build_ui(self) -> None:
         # Transcript output area (wraps and self-scrolls)
@@ -87,25 +91,32 @@ class GameplayScreen:
     async def _initialize(self) -> None:
         """Load and start (or resume) the current experience."""
         if_engine = self._state.if_engine_connector
+        # Ensure engine is initialized (it's pre-warmed in background, but check here)
+        if if_engine:
+            try:
+                await if_engine.initialize()
+            except Exception as e:
+                print(f"_initialize: Engine initialization check failed: {e}")
+
         mgr = self._state.zforge_manager
         exp = self._current_experience
-        print("_initialize: entering gameplay for experience=", exp)
-        print("_initialize: if_engine_connector type=", type(if_engine), "module=", getattr(if_engine, '__module__', None), "file=", getattr(if_engine.__class__, '__module__', None))
+        print(f"_initialize: STARTING for experience={exp}")
+        
         if if_engine is None or mgr is None or exp is None:
-            print("_initialize: missing if_engine/mgr/exp", if_engine, mgr, exp)
+            print(f"_initialize: ABORT - missing context: engine={if_engine}, mgr={mgr}, exp={exp}")
             self._add_game_text("No experience selected.")
             return
 
         compiled_data = mgr.experience_manager.load_experience(exp.zworld_id, exp.name)
-        print("_initialize: loaded compiled_data type=", type(compiled_data), "len=", len(compiled_data) if compiled_data else None)
         if compiled_data is None:
-            print("_initialize: compiled_data is None for", exp.zworld_id, exp.name)
+            print(f"_initialize: ABORT - no file found for {exp.zworld_id}/{exp.name}")
             self._add_game_text("Could not load experience data.")
             return
 
         try:
             if self._resume and mgr.experience_manager.has_saved_progress(exp.zworld_id, exp.name):
                 saved = mgr.experience_manager.load_progress(exp.zworld_id, exp.name)
+                # Need to load the story first before restoring state
                 await if_engine.start_experience(compiled_data)
                 result = await if_engine.restore_state(saved)
                 print("_initialize: restore_state returned", result)
@@ -119,13 +130,14 @@ class GameplayScreen:
                 self._add_game_text(text)
                 self._show_choices(state_choices or None)
         except Exception as exc:
-            print("_initialize: exception during start/restore:", exc)
-            raise
-        else:
-            text = await if_engine.start_experience(compiled_data)
-            state_choices = await if_engine.get_current_choices() if hasattr(if_engine, "get_current_choices") else []
-            self._add_game_text(text)
-            self._show_choices(state_choices or None)
+            import traceback
+            print("_initialize: CRITICAL EXCEPTION")
+            traceback.print_exc()
+            self._add_game_text(f"Error starting experience: {exc}")
+            # Log full stack trace for debugging if possible
+            log.exception("Experience initialization failed")
+        finally:
+            print(f"_initialize: FINISHED for experience={exp}")
 
     def _add_game_text(self, text: str) -> None:
         """Append game output text to the transcript."""
@@ -211,6 +223,10 @@ class GameplayScreen:
 
     def _on_home(self, widget) -> None:
         from zforge.ui.screens.home_screen import HomeScreen
+        # Cancel any pending initialization tasks
+        for task in asyncio.all_tasks():
+            if "_initialize" in str(task.get_coro()):
+                task.cancel()
         screen = HomeScreen(self._app, self._state)
         screen.refresh()
         self._app.main_window.content = screen.box

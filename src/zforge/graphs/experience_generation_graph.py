@@ -591,6 +591,7 @@ def _make_ink_compile_check_node(if_engine_connector: IfEngineConnector):
 
         if build_result.success:
             log.info("ink_compile_check: compilation succeeded")
+            print("ink_compile_check: compilation succeeded")
             return {
                 **zero_counters,
                 "compiled_output": build_result.output,
@@ -603,6 +604,7 @@ def _make_ink_compile_check_node(if_engine_connector: IfEngineConnector):
             "ink_compile_check: compilation failed with %d error(s)",
             len(build_result.errors),
         )
+        print(f"ink_compile_check: compilation failed: {build_result.errors}")
         return {
             **zero_counters,
             "compiler_errors": build_result.errors,

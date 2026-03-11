@@ -150,6 +150,72 @@ Common patterns:
         self._ctx.eval(
             f"globalThis._inkStory = new inkjs.Story(JSON.parse({json.dumps(json_str)}));"
         )
+        # Fault-tolerance: if the story starts in a terminal state (no content
+        # and no choices), or if it canContinue but produces no text (a "ghost" start),
+        # the generated script likely has a missing or broken root divert.
+        # Attempt recovery by seeking the first named knot.
+        recovery = self._ctx.eval(f"""
+            (function() {{
+                var story = globalThis._inkStory;
+                var inkJson = JSON.parse({json.dumps(json_str)});
+                var logs = [];
+                
+                var needsRecovery = (!story.canContinue && story.currentChoices.length === 0);
+                
+                if (!needsRecovery && story.canContinue) {{
+                    var state = story.state.ToJson();
+                    var text = "";
+                    while (story.canContinue) {{ text += story.Continue(); }}
+                    var producedNothing = text.trim().length === 0;
+                    story.state.LoadJson(state);
+                    if (producedNothing && story.currentChoices.length === 0) {{
+                        needsRecovery = true;
+                    }}
+                }}
+
+                if (needsRecovery) {{
+                    logs.push("Recovery triggered");
+                    var excluded = ["inkVersion", "root", "listDefs"];
+                    
+                    // Helper to check an object for knots
+                    function findInObj(obj) {{
+                        return Object.keys(obj).find(function(k) {{
+                            return (excluded.indexOf(k) === -1 && k.indexOf("g-") !== 0 && k !== "#f");
+                        }});
+                    }}
+
+                    // Search top level
+                    var entry = findInObj(inkJson);
+                    
+                    // Search in root array elements (nested knots)
+                    if (!entry && inkJson.root && Array.isArray(inkJson.root)) {{
+                        for (var i = 0; i < inkJson.root.length; i++) {{
+                            var item = inkJson.root[i];
+                            if (item && typeof item === "object" && !Array.isArray(item)) {{
+                                entry = findInObj(item);
+                                if (entry) {{
+                                    logs.push("Found nested entry: " + entry + " in root[" + i + "]");
+                                    break;
+                                }}
+                            }}
+                        }}
+                    }}
+
+                    if (entry) {{
+                        try {{
+                            story.ChoosePathString(entry);
+                            return "recovered:" + entry + " | logs: " + logs.join("; ");
+                        }} catch (e) {{
+                            return "recovery-failed:" + entry + " " + e.toString();
+                        }}
+                    }}
+                    return "no-entry-found | logs: " + logs.join("; ");
+                }}
+                return "ok";
+            }})()
+        """)
+        if recovery != "ok":
+            print("InkEngineConnector.start_experience: recovery attempt ->", recovery)
         # Diagnostic: inspect initial story state and currentChoices to aid debugging.
         try:
             diag = self._ctx.eval(
@@ -171,7 +237,7 @@ Common patterns:
                 return text;
             })()
         """)
-        print("InkEngineConnector._continue_story: raw result repr=", JSON.stringify({val: result}) )
+        print("InkEngineConnector._continue_story: raw result repr=", result)
         # Return the raw string — caller may inspect/strip as needed.
         try:
             return result
