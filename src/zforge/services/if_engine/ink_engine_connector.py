@@ -145,10 +145,22 @@ Common patterns:
     async def start_experience(self, compiled_data: bytes) -> str:
         self._ensure_initialized()
         json_str = compiled_data.decode("utf-8")
+        # inkjs.Story expects a parsed JSON object. Ensure we pass a JS object
+        # by calling JSON.parse(...) on the compiled JSON string.
         self._ctx.eval(
-            f"globalThis._inkStory = new inkjs.Story({json.dumps(json_str)});"
+            f"globalThis._inkStory = new inkjs.Story(JSON.parse({json.dumps(json_str)}));"
         )
-        return self._continue_story()
+        # Diagnostic: inspect initial story state and currentChoices to aid debugging.
+        try:
+            diag = self._ctx.eval(
+                "JSON.stringify({canContinue: globalThis._inkStory.canContinue, choices: globalThis._inkStory.currentChoices.map(function(c){return c.text;})})"
+            )
+            print("InkEngineConnector.start_experience: story diag ->", diag)
+        except Exception as e:
+            print("InkEngineConnector.start_experience: diag eval failed:", e)
+        text = self._continue_story()
+        print("InkEngineConnector.start_experience: continued text type=", type(text), "repr=", repr(text))
+        return text
 
     def _continue_story(self) -> str:
         result = self._ctx.eval("""
@@ -159,7 +171,12 @@ Common patterns:
                 return text;
             })()
         """)
-        return result.strip()
+        print("InkEngineConnector._continue_story: raw result repr=", JSON.stringify({val: result}) )
+        # Return the raw string — caller may inspect/strip as needed.
+        try:
+            return result
+        except Exception:
+            return str(result)
 
     async def take_action(self, input: str) -> ActionResult:
         self._ensure_initialized()

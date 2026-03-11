@@ -75,6 +75,60 @@ PROCESSES: list[ProcessSpec] = [
             ),
         ),
     ),
+    ProcessSpec(
+        slug="experience_generation",
+        display="Experience Generation",
+        nodes=(
+            NodeSpec(
+                slug="outline_author",
+                display="Outline Author",
+                default_provider="Google",
+                default_model="gemini-2.5-flash",
+            ),
+            NodeSpec(
+                slug="outline_reviewer",
+                display="Outline Reviewer",
+                default_provider="Anthropic",
+                default_model="claude-haiku-4-5",
+            ),
+            NodeSpec(
+                slug="prose_writer",
+                display="Prose Writer",
+                default_provider="Anthropic",
+                default_model="claude-sonnet-4-5",
+            ),
+            NodeSpec(
+                slug="prose_reviewer",
+                display="Prose Reviewer",
+                default_provider="Anthropic",
+                default_model="claude-haiku-4-5",
+            ),
+            NodeSpec(
+                slug="ink_scripter",
+                display="Ink Scripter",
+                default_provider="Google",
+                default_model="gemini-2.5-flash",
+            ),
+            NodeSpec(
+                slug="ink_debugger",
+                display="Ink Debugger",
+                default_provider="OpenAI",
+                default_model="gpt-4.1",
+            ),
+            NodeSpec(
+                slug="ink_qa",
+                display="Ink QA",
+                default_provider="Google",
+                default_model="gemini-2.5-flash",
+            ),
+            NodeSpec(
+                slug="ink_auditor",
+                display="Ink Auditor",
+                default_provider="Anthropic",
+                default_model="claude-sonnet-4-5",
+            ),
+        ),
+    ),
 ]
 
 # RemoteConnector → keyring key for its API key.  Used by the config UI to

@@ -14,45 +14,52 @@ Implements: src/zforge/graphs/state.py per docs/LLM Orchestration.md.
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, TypedDict
 
 from langgraph.graph.message import add_messages
 
 
 class ExperienceGenerationState(TypedDict):
-    """State for the experience generation LangGraph graph."""
+    """State for the experience generation LangGraph graph.
+
+    Per docs/Experience Generation.md § Implementation.
+    """
 
     # Inputs (set at initialization)
-    z_world: dict[str, Any]
-    preferences: dict[str, Any]
+    zworld_kvp: dict
+    world_slug: str
+    z_bundle_root: str
+    preferences: dict
     player_prompt: str | None
 
-    # Artifacts (set by @tool functions during execution)
+    # Artifacts (set by agent nodes during execution)
     outline: str | None
-    tech_notes: str | None
-    outline_notes: str | None
-    script: str | None
-    script_notes: str | None
-    tech_edit_report: str | None
-    story_edit_report: str | None
+    research_notes: str | None
+    experience_title: str | None
+    experience_slug: str | None
+    prose_draft: str | None
+    ink_script: str | None
     compiled_output: bytes | None
     compiler_errors: list[str]
 
-    # Iteration counters — use operator.add reducer so tools return 1 to increment
-    outline_iterations: Annotated[int, operator.add]
-    script_compile_iterations: Annotated[int, operator.add]
-    author_review_iterations: Annotated[int, operator.add]
-    tech_edit_iterations: Annotated[int, operator.add]
-    story_edit_iterations: Annotated[int, operator.add]
+    # Feedback (set by reviewers, consumed by writers)
+    outline_feedback: str | None
+    prose_feedback: str | None
+    qa_feedback: str | None
+    audit_feedback: str | None
+
+    # Iteration counters — use operator.add reducer so nodes return 1 to increment
+    outline_review_count: Annotated[int, operator.add]
+    prose_review_count: Annotated[int, operator.add]
+    compile_fix_count: Annotated[int, operator.add]
+    script_rewrite_count: Annotated[int, operator.add]
 
     # Status
     status: str
     status_message: str
     failure_reason: str | None
-    current_rationale: str | None
-    action_log: Annotated[list, operator.add]
 
-    # LangGraph message history — must use add_messages reducer
+    # LangGraph message history — for observability
     messages: Annotated[list, add_messages]
 
 

@@ -191,3 +191,16 @@ where `world_slug` is the input world slug, and `experience_slug` is the kebab-c
 
 - **Process slug:** `experience_generation`
 - **LLM nodes:** `outline_author`, `outline_reviewer`, `prose_writer`, `prose_reviewer`, `ink_scripter`, `ink_debugger`, `ink_qa`, `ink_auditor`
+
+### Pitfalls
+
+- **`ZWorld` is a plain dataclass, not a Pydantic model.** When serialising the input `ZWorld` to a dict for the graph's initial state, use `dataclasses.asdict(zworld)`. Do **not** use `dict(zworld)` — `dict()` on a dataclass attempts to iterate it as key-value pairs and raises `TypeError: 'ZWorld' object is not iterable`. Also do not rely on `hasattr(zworld, "model_dump")` as the primary check; the correct portable pattern is `dataclasses.asdict()` for all dataclass models in this project.
+
+- **Embedding model load must not occur on the async event loop.** `LlamaCppEmbeddingConnector.get_embeddings()` lazily constructs a `LlamaCppEmbeddings` instance on first call, which loads the GGUF file synchronously. If this is called directly inside an `async` graph node (even before `await`), it blocks the entire event loop — in BeeWare/Toga this causes the UI to freeze with no error and no log output. The correct pattern is to fold `get_embeddings()` into the same `run_in_executor` call as `embed_query()`, so the first-call model load also occurs on the thread pool:
+  ```python
+  query_vec = await loop.run_in_executor(
+      _LLAMA_EXECUTOR,
+      lambda: embedding_connector.get_embeddings().embed_query(query),
+  )
+  ```
+  Do **not** separate the two calls as `embedder = embedding_connector.get_embeddings()` followed by `run_in_executor(..., lambda: embedder.embed_query(query))` — the first line is the blocking operation.

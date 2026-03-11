@@ -124,24 +124,31 @@ Process objects are not persisted but track multi-step LLM workflows. See [Manag
 ```mermaid
 erDiagram
     ExperienceGenerationProcess {
-        ExperienceGenerationStatus status
+        string status "outlining, reviewing_outline, writing_prose, reviewing_prose, scripting, compiling, debugging, qa, auditing, complete, failed"
         string statusMessage "current step description for UI"
         string failureReason "optional"
+        dict zworldKvp "input"
+        string worldSlug "input"
+        string zBundleRoot "input"
+        dict preferences "input"
         string playerPrompt "optional input"
         string outline "optional"
-        string techNotes "optional"
-        string outlineNotes "optional"
-        string script "optional"
-        string scriptNotes "optional"
-        string techEditReport "optional"
-        string storyEditReport "optional"
+        string researchNotes "optional"
+        string experienceTitle "optional"
+        string experienceSlug "optional"
+        string proseDraft "optional"
+        string inkScript "optional"
         bytes compiledOutput "optional"
-        stringArray compilerErrors "optional"
-        int outlineIterations
-        int scriptCompileIterations
-        int authorReviewIterations
-        int techEditIterations
-        int storyEditIterations
+        stringArray compilerErrors
+        string outlineFeedback "optional"
+        string proseFeedback "optional"
+        string qaFeedback "optional"
+        string auditFeedback "optional"
+        int outlineReviewCount
+        int proseReviewCount
+        int compileFixCount
+        int scriptRewriteCount
+        list messages
     }
     CreateWorldProcess {
         string status "parsing, summarizing, finalizing, complete, failed"
@@ -170,8 +177,8 @@ erDiagram
         int currentChunkIndex
     }
 
-    ExperienceGenerationProcess ||--|| ZWorld : "input"
-    ExperienceGenerationProcess ||--|| PlayerPreferences : "input"
+    ExperienceGenerationProcess ||--|| ZWorld : "references via slug"
+    ExperienceGenerationProcess ||--|| PlayerPreferences : "optional input"
     AskAboutWorldProcess ||--|| ZWorld : "input"
 ```
 

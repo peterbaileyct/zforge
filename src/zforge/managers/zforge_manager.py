@@ -9,8 +9,9 @@ docs/LLM Orchestration.md and docs/Managers, Processes, and MCP Server.md.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
-from typing import Any, Callable, Coroutine
+from typing import Any, Awaitable, Callable
 
 log = logging.getLogger(__name__)
 
@@ -20,7 +21,8 @@ from zforge.graphs.experience_generation_graph import (
 from zforge.graphs.world_creation_graph import build_create_world_graph
 from zforge.managers.experience_manager import ExperienceManager
 from zforge.managers.zworld_manager import ZWorldManager
-from zforge.models.zforge_config import PlayerPreferences, ZForgeConfig
+from zforge.models.zforge_config import ZForgeConfig
+from zforge.models.results import Experience
 from zforge.models.zworld import ZWorld
 from zforge.services.embedding.embedding_connector import EmbeddingConnector
 from zforge.services.if_engine.if_engine_connector import IfEngineConnector
@@ -50,11 +52,10 @@ class ZForgeManager:
         self._if_engine_connector = if_engine_connector
         self._embedding_connector = embedding_connector
         self._world_creation_graph = None
+        self._experience_generation_graph = None
 
         # Inject dependencies for tool functions
         set_zworld_manager(zworld_manager)
-        from zforge.tools.experience_tools import set_if_engine_connector
-        set_if_engine_connector(if_engine_connector)
 
     async def run_process(
         self,
@@ -117,7 +118,8 @@ class ZForgeManager:
         """
         self._config = config
         self._world_creation_graph = None
-        log.info("update_config: config refreshed, world creation graph reset")
+        self._experience_generation_graph = None
+        log.info("update_config: config refreshed, cached graphs reset")
 
     def _resolve_node_connector(
         self, process_slug: str, node_slug: str
@@ -148,23 +150,23 @@ class ZForgeManager:
     async def start_world_creation(
         self,
         input_text: str,
-        on_status_update: Callable[[str], None] | None = None,
+        on_progress: Callable[[str], None] | None = None,
         on_confirm_duplicate: Callable[
-            [str, str], Coroutine
+            [str], Awaitable[str]
         ] | None = None,
-    ) -> dict[str, Any]:
+    ) -> ZWorld | None:
         """Run the world creation process.
 
         Parameters
         ----------
         input_text:
             The raw world-bible text supplied by the user.
-        on_status_update:
+        on_progress:
             Optional callback for streaming status messages to the UI.
         on_confirm_duplicate:
             Optional async callback invoked when a world with the same title
-            already exists.  Receives ``(new_title, conflicting_slug)`` and
-            must return ``"overwrite"`` or ``"cancel"``.
+            already exists.  Receives the ``conflicting_slug`` and must return
+            ``"overwrite"`` or ``"cancel"``.
         """
         if self._world_creation_graph is None:
             log.info("start_world_creation: building graph (first call)")
@@ -204,61 +206,157 @@ class ZForgeManager:
             "failure_reason": None,
             "messages": [],
         }
-        result = await self.run_process(graph, initial_state, on_status_update)
+        result = await self.run_process(graph, initial_state, on_progress)
 
         if result.get("status") == "awaiting_confirmation":
             if on_confirm_duplicate is None:
-                # No handler provided — default to cancel.
                 log.warning(
                     "start_world_creation: duplicate detected but no "
                     "on_confirm_duplicate callback — cancelling"
                 )
-                return {
-                    **result,
-                    "status": "cancelled",
-                    "status_message": "World creation cancelled: duplicate title detected.",
-                }
+                return None
 
-            kvp = result.get("zworld_kvp") or {}
-            new_title = kvp.get("title", "")
             conflicting_slug = result.get("conflicting_slug", "")
-            decision = await on_confirm_duplicate(new_title, conflicting_slug)
+            decision = await on_confirm_duplicate(conflicting_slug)
             log.info(
-                "start_world_creation: duplicate decision=%r for title=%r",
+                "start_world_creation: duplicate decision=%r for slug=%r",
                 decision,
-                new_title,
+                conflicting_slug,
             )
 
-            # Resume the graph with the decision; skip expensive nodes by
-            # forwarding the already-computed z_bundle_root and zworld_kvp.
+            if decision != "overwrite":
+                return None
+
             resume_state = {
                 **result,
                 "overwrite_decision": decision,
-                "messages": [],  # reset to avoid spurious add_messages accumulation
+                "messages": [],
                 "status": "resuming",
                 "status_message": f"Resuming world creation with decision: {decision}",
             }
-            result = await self.run_process(graph, resume_state, on_status_update)
+            result = await self.run_process(graph, resume_state, on_progress)
 
-        return result
+        if result.get("status") == "complete":
+            kvp = result.get("zworld_kvp")
+            if kvp:
+                return ZWorld(**kvp) if isinstance(kvp, dict) else kvp
+        return None
 
     async def start_experience_generation(
         self,
-        z_world: ZWorld,
-        preferences: PlayerPreferences,
+        world_slug: str,
         player_prompt: str | None = None,
-        on_status_update: Callable[[str], None] | None = None,
-        on_rationale_update: Callable[[str, dict], None] | None = None,
-    ) -> dict[str, Any]:
+        on_progress: Callable[[str], None] | None = None,
+    ) -> Experience | None:
         """Run the experience generation process.
 
-        TODO: Experience generation must be reworked to consume the new
-        Z-Bundle world format.  For now this raises NotImplementedError.
+        Parameters
+        ----------
+        world_slug:
+            Slug of the Z-World to generate an experience for.
+        player_prompt:
+            Optional player prompt / scenario seed.
+        on_progress:
+            Optional callback for streaming status messages to the UI.
+
+        Returns
+        -------
+        Experience | None
+            The saved Experience on success, or None on failure.
         """
-        raise NotImplementedError(
-            "Experience generation has not yet been updated for the new "
-            "Z-Bundle world format. This will be implemented in a future update."
+        log.info("start_experience_generation: ENTERED  world_slug=%r", world_slug)
+        # Load world data
+        zworld = self.zworld_manager.read(world_slug)
+        log.info("start_experience_generation: read zworld=%r", zworld)
+        zworld_kvp = zworld.model_dump() if hasattr(zworld, "model_dump") else dataclasses.asdict(zworld)
+        z_bundle_root = str(self.zworld_manager._world_root(world_slug))
+        log.info("start_experience_generation: z_bundle_root=%r", z_bundle_root)
+
+        # Build graph (cached)
+        if self._experience_generation_graph is None:
+            log.info("start_experience_generation: building graph (first call)")
+            node_slugs = [
+                "outline_author", "outline_reviewer",
+                "prose_writer", "prose_reviewer",
+                "ink_scripter", "ink_debugger",
+                "ink_qa", "ink_auditor",
+            ]
+            connectors: dict[str, tuple] = {}
+            for ns in node_slugs:
+                conn, model = self._resolve_node_connector("experience_generation", ns)
+                connectors[ns] = (conn, model)
+
+            self._experience_generation_graph = build_experience_generation_graph(
+                outline_author_connector=connectors["outline_author"][0],
+                outline_author_model=connectors["outline_author"][1],
+                outline_reviewer_connector=connectors["outline_reviewer"][0],
+                outline_reviewer_model=connectors["outline_reviewer"][1],
+                prose_writer_connector=connectors["prose_writer"][0],
+                prose_writer_model=connectors["prose_writer"][1],
+                prose_reviewer_connector=connectors["prose_reviewer"][0],
+                prose_reviewer_model=connectors["prose_reviewer"][1],
+                ink_scripter_connector=connectors["ink_scripter"][0],
+                ink_scripter_model=connectors["ink_scripter"][1],
+                ink_debugger_connector=connectors["ink_debugger"][0],
+                ink_debugger_model=connectors["ink_debugger"][1],
+                ink_qa_connector=connectors["ink_qa"][0],
+                ink_qa_model=connectors["ink_qa"][1],
+                ink_auditor_connector=connectors["ink_auditor"][0],
+                ink_auditor_model=connectors["ink_auditor"][1],
+                embedding_connector=self._embedding_connector,
+                if_engine_connector=self._if_engine_connector,
+            )
+
+        initial_state = {
+            "zworld_kvp": zworld_kvp,
+            "world_slug": world_slug,
+            "z_bundle_root": z_bundle_root,
+            "preferences": {},
+            "player_prompt": player_prompt,
+            "outline": None,
+            "research_notes": None,
+            "experience_title": None,
+            "experience_slug": None,
+            "prose_draft": None,
+            "ink_script": None,
+            "compiled_output": None,
+            "compiler_errors": [],
+            "outline_feedback": None,
+            "prose_feedback": None,
+            "qa_feedback": None,
+            "audit_feedback": None,
+            "outline_review_count": 0,
+            "prose_review_count": 0,
+            "compile_fix_count": 0,
+            "script_rewrite_count": 0,
+            "status": "outlining",
+            "status_message": "Starting experience generation...",
+            "failure_reason": None,
+            "messages": [],
+        }
+
+        log.info("start_experience_generation: calling run_process")
+        result = await self.run_process(initial_state=initial_state, graph=self._experience_generation_graph, on_status_update=on_progress)
+        log.info("start_experience_generation: run_process returned status=%r", result.get("status"))
+
+        if result.get("status") == "complete":
+            compiled = result.get("compiled_output")
+            exp_slug = result.get("experience_slug", "untitled")
+            if compiled:
+                experience = self.experience_manager.create(
+                    world_slug, exp_slug, compiled
+                )
+                log.info(
+                    "start_experience_generation: saved experience slug=%r",
+                    exp_slug,
+                )
+                return experience
+        log.warning(
+            "start_experience_generation: finished with status=%r reason=%r",
+            result.get("status"),
+            result.get("failure_reason"),
         )
+        return None
 
     async def ask_about_world(self, slug: str, question: str) -> str:
         """Answer a question about a world using agentic RAG.

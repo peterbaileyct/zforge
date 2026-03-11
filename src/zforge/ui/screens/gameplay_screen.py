@@ -41,6 +41,8 @@ class GameplayScreen:
             style=Pack(direction=COLUMN, padding=5)
         )
         self._build_ui()
+        # Show immediate UI feedback and start initialize in background
+        self._add_game_text("Loading experience...")
         asyncio.ensure_future(self._initialize())
 
     def _build_ui(self) -> None:
@@ -87,25 +89,38 @@ class GameplayScreen:
         if_engine = self._state.if_engine_connector
         mgr = self._state.zforge_manager
         exp = self._current_experience
+        print("_initialize: entering gameplay for experience=", exp)
+        print("_initialize: if_engine_connector type=", type(if_engine), "module=", getattr(if_engine, '__module__', None), "file=", getattr(if_engine.__class__, '__module__', None))
         if if_engine is None or mgr is None or exp is None:
+            print("_initialize: missing if_engine/mgr/exp", if_engine, mgr, exp)
             self._add_game_text("No experience selected.")
             return
 
-        compiled_data = mgr.experience_manager.load_experience(
-            exp.zworld_id, exp.name
-        )
+        compiled_data = mgr.experience_manager.load_experience(exp.zworld_id, exp.name)
+        print("_initialize: loaded compiled_data type=", type(compiled_data), "len=", len(compiled_data) if compiled_data else None)
         if compiled_data is None:
+            print("_initialize: compiled_data is None for", exp.zworld_id, exp.name)
             self._add_game_text("Could not load experience data.")
             return
 
-        if self._resume and mgr.experience_manager.has_saved_progress(
-            exp.zworld_id, exp.name
-        ):
-            saved = mgr.experience_manager.load_progress(exp.zworld_id, exp.name)
-            await if_engine.start_experience(compiled_data)
-            result = await if_engine.restore_state(saved)
-            self._add_game_text(result.text)
-            self._show_choices(result.choices)
+        try:
+            if self._resume and mgr.experience_manager.has_saved_progress(exp.zworld_id, exp.name):
+                saved = mgr.experience_manager.load_progress(exp.zworld_id, exp.name)
+                await if_engine.start_experience(compiled_data)
+                result = await if_engine.restore_state(saved)
+                print("_initialize: restore_state returned", result)
+                self._add_game_text(result.text)
+                self._show_choices(result.choices)
+            else:
+                text = await if_engine.start_experience(compiled_data)
+                print("_initialize: start_experience returned text len=", len(text) if isinstance(text, str) else None)
+                state_choices = await if_engine.get_current_choices() if hasattr(if_engine, "get_current_choices") else []
+                print("_initialize: current choices=", state_choices)
+                self._add_game_text(text)
+                self._show_choices(state_choices or None)
+        except Exception as exc:
+            print("_initialize: exception during start/restore:", exc)
+            raise
         else:
             text = await if_engine.start_experience(compiled_data)
             state_choices = await if_engine.get_current_choices() if hasattr(if_engine, "get_current_choices") else []
