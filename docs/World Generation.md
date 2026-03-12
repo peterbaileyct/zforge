@@ -1,94 +1,170 @@
-# World Creation Workflow
-A ZWorld is generated from a plain-text description by the following process:
-
-- A plain-text world description is provided, either by direct entry or by providing a Word or PDF file.
-- A new CreateWorldProcess object is inserted into the ZForgeManager, thus exposing it to the MCP Server; this CreateWorldProcess is responsible for the following steps
-- The configured LLM is given a system prompt of "You are a literature editor. You are to determine whether the following is a clear description of a fictional world, listing characters and their relationships with one another, locations, and events: {given description}", an action prompt to "evaluate the given world description", and a tool to answer yes or no by calling a function that sets InputValid = true or false on the CreateWorldProcess
-- The above is repeated up to five times until the given answer is yes; InputValid will be set to null between attempts so that the true/false will be recognized as a change
-- If the above has failed after five attempts, the user LLM will be asked to describe why the given text is inadequate or inappropriate; the user will then be shown a message indicating the failure and including the LLM's explanation; the world creation attempt then ends.
-- If the above succeeds, the LLM will be given a system prompt of "You are a designer for an interactive fiction system. ZWorlds, used as the basis of your interactive fiction experiences, consist of the following: {zworld spec from ZWorld.md} Create a ZWorld from the following description of a fictional world: {given description}", an action prompt of "build the specified ZWorld", and a tool that calls the "create zworld" method on the ZForgeManager, which delegates it to the ZWorldManager
-- The ZWorld is created in memory and saved to storage (configured folder on Mac/PC; application storage on mobile)
-- The user is asked if they would like to [generate an experience]("Experience Generation.md") from this new world
-
-## CreateWorldProcess State Machine
-The process tracks its current state via a `status` enum:
-- `awaitingValidation` — Initial state; LLM is evaluating input validity
-- `awaitingGeneration` — Input validated; LLM is generating ZWorld
-- `complete` — ZWorld created successfully
-- `failed` — Process failed (invalid input after 5 attempts, or generation error)
-
-## CreateWorldProcess Properties
-- **Inputs**: `inputText`: String — the plain-text world description
-- **State**: `inputValid`: bool? — result of last validation (null between attempts)
-- **Counters**: `validationIterations`: int — attempts at validation (max 5)
-- **Status**: `status`: CreateWorldStatus, `failureReason`: String?
-
-## MCP Tool Derivation
-Per [Managers, Processes, and MCP Server](Managers,%20Processes,%20and%20MCP%20Server.md), implementation agents derive MCP tools from this specification:
-
-| Tool | Called By | Accepts | Performs | Advances To |
-|------|-----------|---------|----------|-------------|
-| `world_validate_input` | LLM (Editor role) | valid: bool | Sets `inputValid`, increments counter | `awaitingGeneration` (valid) or retry/`failed` |
-| `world_create_zworld` | LLM (Designer role) | name, locations, characters, relationships, events | Creates ZWorld via ZWorldManager | `complete` |
-| `world_explain_rejection` | LLM (Editor role) | explanation: String | Sets `failureReason` | `failed` |
-
-## Flow Diagram
+# World Generation Process
+The following [Process](Processes.md) generates a [Z-World](Z-World.md) from an unstructured description of a fictional world, [parsing](Parsing%20Documents%20to%20Z-Bundles.md) it to a [Z-Bundle](RAG%20and%20GRAG%20Implementation.md).
 
 ```mermaid
 flowchart TD
-    A[User provides world description\ntext input or file] --> B[CreateWorldProcess.run]
-    B --> C{LLM validates input\nattempt 1–5}
-    C -- valid=true --> D[LLM generates ZWorld\nvia create_zworld tool]
-    C -- valid=false / all attempts exhausted --> E[LLM explains rejection]
-    E --> F[Show error to user\nworld creation ends]
-    D --> G[ZForgeMcpServer dispatches\ncreate_zworld tool call]
-    G --> H[ZWorldManager saves .zworld file]
-    H --> I[ZWorldEvent.created broadcast]
-    I --> J[HomeScreen updates world list]
-    J --> K[User prompted to\ncreate an experience]
-```
-
-## Sequence Diagram
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant UI as CreateWorldScreen
-    participant P as CreateWorldProcess
-    participant LLM as LlmConnector (OpenAI)
-    participant MCP as ZForgeMcpServer
-    participant WM as ZWorldManager
-
-    U->>UI: Enter/load world description
-    U->>UI: Tap "Create World"
-    UI->>P: run(inputText)
-
-    loop Validation (up to 5 attempts)
-        P->>LLM: execute(validate_input tool)
-        LLM-->>P: validate_input(valid: true/false)
+    subgraph Agents
+        A_summarizer["Summarizer\n(Google · gemini-2.5-flash-lite)"]
     end
 
-    alt Input valid
-        P->>LLM: execute(create_zworld tool)
-        LLM-->>P: create_zworld(name, locations, characters, ...)
-        P->>MCP: dispatch("create_zworld", args)
-        MCP->>WM: create(ZWorld)
-        WM-->>MCP: saved
-        MCP-->>P: ZWorld
-        P-->>UI: status=success
-        UI-->>U: "World created!"
-    else Input rejected
-        P->>LLM: execute(explain rejection)
-        LLM-->>P: explanation text
-        P-->>UI: status=inputRejected, errorMessage
-        UI-->>U: Show rejection explanation
+    subgraph State
+        S_input_text[/"input_text"/]
+        S_world_uuid[/"world_uuid"/]
+        S_z_bundle_root[/"z_bundle_root"/]
+        S_zworld_kvp[/"zworld_kvp"/]
+        S_conflicting_slug[/"conflicting_slug"/]
+        S_overwrite_decision[/"overwrite_decision"/]
+        S_status[/"status"/]
+        S_failure_reason[/"failure_reason"/]
     end
+
+    subgraph Repositories
+        R_vector[(LanceDB · chunks)]
+        R_graph[(KuzuDB · property graph)]
+    end
+
+    subgraph Tools
+        T_vec_retriever[retrieve_vector] --> R_vector
+        T_graph_retriever[retrieve_graph] --> R_graph
+    end
+
+    subgraph Process
+        P_start(( )) --> P_doc_parsing["Document Parsing\nsub-process"]
+        P_doc_parsing --> P_summarizer[Summarizer]
+        P_summarizer -->|"retrieves: Z-Bundle"| P_summarizer
+        P_summarizer --> P_dup_check[Duplicate Check]
+        P_dup_check -->|"no conflict\nor overwrite"| P_finalizer[Finalizer]
+        P_dup_check -->|"awaiting confirmation"| P_stop_await((await))
+        P_stop_await -->|"user decision"| P_dup_check
+        P_finalizer --> P_stop(( ))
+    end
+
+    P_doc_parsing <-.-> S_input_text
+    P_doc_parsing <-.-> S_world_uuid
+    P_doc_parsing <-.-> S_z_bundle_root
+    P_summarizer <-.-> A_summarizer
+    P_summarizer <-.-> S_z_bundle_root
+    P_summarizer <-.-> S_zworld_kvp
+    P_dup_check <-.-> S_zworld_kvp
+    P_dup_check <-.-> S_conflicting_slug
+    P_dup_check <-.-> S_overwrite_decision
+    P_finalizer <-.-> S_zworld_kvp
+    P_finalizer <-.-> S_world_uuid
+    T_vec_retriever <-.-> P_summarizer
+    T_graph_retriever <-.-> P_summarizer
 ```
 
-## Implementation Files
-- `lib/processes/create_world_process.dart` — `CreateWorldProcess`
-- `lib/services/llm/llm_connector.dart` — `LlmConnector` abstract class
-- `lib/services/llm/openai_connector.dart` — `OpenAiConnector`
-- `lib/services/mcp/zforge_mcp_server.dart` — `ZForgeMcpServer`
-- `lib/services/managers/zworld_manager.dart` — `ZWorldManager`
-- `lib/ui/screens/create_world_screen.dart` — `CreateWorldScreen`
+## Input
+The user provides a large, unstructured text — typically a "world bible" or similar document describing a fictional world's characters, locations, events, and narrative conventions.
+
+## Pipeline
+### Step 1: Document Parsing
+The input text is run through the general [Document Parsing pipeline](Parsing%20Documents%20to%20Z-Bundles.md) (process slug: `document_parsing`), which populates the Z-Bundle's vector store and property graph.
+
+This step uses the following `LLMGraphTransformer` configuration, derived directly from the [Z-World entity types](Z-World.md#vector) and [property graph edges](Z-World.md#property-graph):
+
+**`allowed_nodes`:**
+`Character`, `Location`, `Event`, `Faction`, `Artifact`, `Era`, `Culture`, `Deity`, `Prophecy`, `Concept`, `Mechanic`, `Trope`, `Species`, `Occupation`
+
+**`allowed_relationships`:**
+`friends_with`, `enemy_of`, `parent_of`, `mentor_of`, `present_at`, `born_in`, `member_of`, `leads`, `is_a`, `owns`, `seeks`, `subject_to`, `embodies`, `west_of`, `inside_of`, `controls`, `native_to`, `located_at`, `occurred_at`, `allied_with`, `at_war_with`, `caused`, `preceded`
+
+### Step 2: LLM Node — Summarizer
+
+After the hybrid data store is populated, an LLM node queries it to produce the KVP metadata for the Z-World (all KVP fields except `slug` and `uuid`, which are derived deterministically in Step 3). Default: `gemini-2.5-flash-lite` (Google).
+
+The Summarizer LLM is given access to the Z-Bundle via **LangChain retriever tools** bound through the standard [LLM Abstraction Layer](LLM%20Abstraction%20Layer.md) tool-binding mechanism:
+- A **vector retriever tool** backed by the LanceDB `chunks` table (semantic similarity search over entity text).
+- A **graph retriever tool** backed by the KuzuDB property graph (structured lookup by entity type or name).
+
+The LLM freely invokes these tools as needed before producing its final JSON output.
+
+**Prompt (authoritative):**
+
+> You are a junior script editor with access to a hybrid data store describing a fictional world. Look up appropriate details to produce the following information about the world in a JSON document:
+> - `title`: the full display name of the world (e.g. "Discworld")
+> - `summary`: 3–5 sentences describing the world in diegetic terms, suitable for helping a player understand the world at a glance
+> - `setting_era`: a brief label for when the world is nominally set (e.g. "pre-industrial fantasy", "far future", "alternate 1920s")
+> - `source_canon`: a list of source work titles — books, films, games — the world is drawn from
+> - `content_advisories`: a list of thematic flags relevant to experience generation (e.g. "moderate violence", "political intrigue", "body horror")
+
+**JSON schema (authoritative):** The Summarizer must return a single JSON object with exactly these keys, matching the [ZWorld](../src/zforge/models/zworld.py) object schema with `uuid` and `slug` omitted:
+
+```json
+{
+  "title": "...",
+  "summary": "...",
+  "setting_era": "...",
+  "source_canon": ["..."],
+  "content_advisories": ["..."]
+}
+```
+
+### Step 3: Duplicate Check (non-LLM)
+
+Before writing any output, the pipeline checks whether an existing world shares the same title as the newly summarised world. The check normalises both titles to kebab-case slugs and compares them; if a match is found and no user decision is recorded in the state yet (`overwrite_decision is None`), the graph sets `status = "awaiting_confirmation"` and exits.
+
+`ZForgeManager.start_world_creation` senses the `awaiting_confirmation` status, invokes its `on_confirm_duplicate` async callback (provided by the UI), and re-invokes the graph with `overwrite_decision = "overwrite"` or `"cancel"`. Because `z_bundle_root` and `zworld_kvp` are already set in the resumed state, the document-parsing and summariser nodes early-exit without repeating their expensive work.
+
+If the decision is `"cancel"`, the pipeline completes with `status = "cancelled"` and the in-progress bundle is left in `worlds-in-progress/` for eventual clean-up. If the decision is `"overwrite"`, the existing world is deleted before the final move (see Step 4).
+
+### Step 4: Finalisation (non-LLM)
+
+A deterministic post-processing step takes the Summariser's JSON output and:
+1. Constructs a `ZWorld` object populated with `title`, `summary`, `setting_era`, `source_canon`, and `content_advisories`.
+2. Derives the `slug` by converting the title to kebab-case (e.g. `"The Dragonet Prophecy"` → `"the-dragonet-prophecy"`).
+3. Uses the UUID that was assigned at graph entry (stored in `world_uuid` state field) — no new UUID is generated here.
+4. If `overwrite_decision == "overwrite"`, deletes the existing world bundle at `worlds/{conflicting_slug}/` before moving.
+5. **Moves the in-progress Z-Bundle** from `worlds-in-progress/{uuid}/` to `worlds/{slug}/` (see [In-progress Z-Bundle path](#in-progress-z-bundle-path)).
+6. Writes all KVP fields (`title`, `summary`, `setting_era`, `source_canon`, `content_advisories`, `slug`, `uuid`) to the Z-Bundle KVP store (`kvp.json`).
+
+## Implementation
+
+Most parsing implementation details are covered in the [Document Parsing](Parsing%20Documents%20to%20Z-Bundles.md) spec.
+
+- **Process slug:** `world_generation`
+- **LLM nodes** (defined in `process_config.py`):
+  - `summarizer` — Step 2 metadata extraction; default `Google` / `gemini-2.5-flash-lite`
+- **Implementation file:** `src/zforge/graphs/world_creation_graph.py` (full rewrite)
+- **`allowed_nodes` / `allowed_relationships`:** Listed in Step 1 above; authoritative source is [Z-World.md](Z-World.md).
+- **`ZWorld` Python model** (`src/zforge/models/zworld.py`) — Replace the existing entity-heavy model (which holds `Character`, `Location`, `Event`, etc. as Python objects) with a simple KVP dataclass. All entity data is now stored in LanceDB and KuzuDB by the document-parsing pipeline; the Python object only represents the KVP fields:
+  ```python
+  @dataclass
+  class ZWorld:
+      title: str
+      slug: str
+      uuid: str
+      summary: str
+      setting_era: str = ""
+      source_canon: list[str] = field(default_factory=list)
+      content_advisories: list[str] = field(default_factory=list)
+  ```
+  Remove the `CharacterName`, `Character`, `Location`, `Event`, `Mechanic`, `Trope`, `Species`, `Occupation`, and `Relationship` dataclasses from this file.
+- **`ZWorldManager.create()`** — Under this pipeline, the vector store and property graph are fully populated by the document-parsing step before `create()` is called. Therefore `create()` accepts only the `ZWorld` KVP object and the raw input text string; it writes `kvp.json` and `source.txt` to the bundle root and does **not** interact with LanceDB or KuzuDB. `ZWorldManager.__init__` still accepts an `EmbeddingConnector` so that `create()` can append `embedding_model_name` and `embedding_model_size_bytes` to `kvp.json` (required by the [Z-Bundle spec](RAG%20and%20GRAG%20Implementation.md)). `ZWorldManager.read()` returns KVP metadata only; `list_all()` and `check_embedding_mismatch()` are unchanged in behaviour. A full tidy of `ZWorldManager` (removing all now-superseded vector/graph write-and-read logic) is included in this build.
+- **`CreateWorldState`** (in `src/zforge/graphs/state.py`) — Replace the old chunking/validation state with:
+  ```python
+  class CreateWorldState(TypedDict):
+      input_text: str               # Raw source text (input)
+      world_uuid: str | None        # Assigned at graph entry; stable across resume
+      z_bundle_root: str | None     # worlds-in-progress/{uuid}/ until finalised
+      zworld_kvp: dict | None       # Summarizer JSON output; set by the summarizer node
+      conflicting_slug: str | None  # Set by duplicate_check if same-title world exists
+      overwrite_decision: str | None  # "overwrite" | "cancel" | None
+      status: str                   # e.g. "parsing", "summarizing", "awaiting_confirmation", "complete", "cancelled", "failed"
+      status_message: str
+      failure_reason: str | None
+      messages: Annotated[list, add_messages]
+  ```
+
+- **Async nodes required:** `document_parsing_node` and `summarizer_node` must be `async def` and use `await parsing_graph.ainvoke(...)` / `await bound_model.ainvoke(...)`. See the [Document Parsing async pitfall note](Parsing%20Documents%20to%20Z-Bundles.md#async-nodes-required--afc-deadlock-pitfall) for the full explanation — the same AFC deadlock applies here.
+
+### In-progress Z-Bundle path
+
+**Why it exists:** The canonical slug is derived from the LLM-generated title (Step 2), but the vector store and property graph must be written during Step 1 — before the title is known. This is resolved by writing to a stable, UUID-keyed holding directory and moving to the final location only at the very end.
+
+**How it works:**
+1. At entry to the `document_parsing_node`, a UUID is generated (`world_uuid = str(uuid.uuid4())`) and stored in `CreateWorldState.world_uuid`. The full Z-Bundle path (`<bundles_root>/worlds-in-progress/<uuid>/`) is stored in `CreateWorldState.z_bundle_root`.
+2. All document-parsing writes (LanceDB vector store, KuzuDB property graph) target this in-progress path.
+3. In the Finaliser, once the canonical slug has been derived from the title, `os.rename(<in_progress_path>, <final_path>)` moves the bundle to `<bundles_root>/world/<slug>/`. `z_bundle_root` in state is updated to the final path before `ZWorldManager.create()` is invoked.
+
+**Resume on duplicate confirmation:** When the graph is re-invoked after a duplicate confirmation, `z_bundle_root` is already set in the initial state. The `document_parsing_node` detects this and skips immediately; the summariser does the same when `zworld_kvp` is already set. This avoids reprocessing the document for the second graph invocation.

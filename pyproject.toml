@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zforge"
+version = "0.1.0"
+description = "Z-Forge: AI-powered Interactive Fiction creation tool."
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "flet>=0.24",
+    "langgraph>=0.2",
+    "langchain>=0.3",
+    "langchain-core>=0.3",
+    "langchain-openai>=0.2",
+    "langchain-google-genai>=2.0",
+    "langchain-anthropic>=0.3",
+    "langchain-groq>=0.2",
+    "langchain-community>=0.3",
+    "langchain-experimental>=0.3",
+    "quickjs>=1.19",
+    "keyring>=25.0",
+    "platformdirs>=4.0",
+    "mcp>=1.0",
+    "lancedb>=0.3",
+    "kuzu>=0.4",
+    "llama-cpp-python>=0.2",
+    "mwparserfromhell>=0.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+zforge = "zforge.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

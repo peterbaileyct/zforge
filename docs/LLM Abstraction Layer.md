@@ -1,51 +1,50 @@
 # LLM Abstraction Layer
-To maximize configurability and allow for expansion, an abstraction layer exists between the main Z-Forge engine and any LLMs used for procedural generation. We call this the "LLM Connector". This is implemented via abstract classes and interfaces that allow for a new LLM to be easily dropped in, and, in a later version, to allow selection between different LLM's for different features, with an eye toward adding image generation and runtime LLM invocation for infinite dialog, narration, and even hints. 
+To maximize configurability and allow for expansion, an abstraction layer exists between the main Z-Forge engine and any LLM invocation, to allow selection between different LLM's for different features, and with an eye toward adding (in a future version) image generation and runtime LLM invocation for infinite dialog, narration, and even hints.
 
-## Platform Requirements
+## Configurability
+No LLM call is hard-coded; instead, LLMs are always invoked through [Processes](Processes.md). To allow for this abstraction and configuration, the state machine implementing a Process must be built with reference to the application configuration, with default values specified in the spec file for that process and in the code at compile time. Each LLM call node uses a specific provider and a specific model. Providers may be [local](Local%20LLM%20Execution.md) or online.
 
-LLM credentials are stored in secure storage (`flutter_secure_storage`). Each platform requires specific entitlements or permissions for this to work:
-
-| Platform | Required configuration |
-|---|---|
-| **macOS** | `com.apple.security.network.client` entitlement in both `DebugProfile.entitlements` and `Release.entitlements` for outgoing API calls; `com.apple.security.files.user-selected.read-only` for file picker. `flutter_secure_storage` is configured with `useDataProtectionKeyChain: false` to use the legacy file-based keychain, avoiding the need for the `keychain-access-groups` entitlement (which requires a signed App Store build). |
-| **iOS** | No extra entitlements needed; Keychain access is available by default |
-| **Android** | `android.permission.INTERNET` in `AndroidManifest.xml` for API calls |
-| **Windows** | No extra configuration needed |
-| **Web** | Credentials stored in browser localStorage (less secure); no extra config needed |
-
-Any agent implementing or modifying the secure config storage, LLM connector, or platform build configuration must ensure these entitlements/permissions are present.
-
-
+World Generation targets the remote `gpt-5-nano` model by default, deferring to user-specified provider/model pairs whenever they are explicitly set.
 
 ## Configuration
 The LLM connector defines an arbitrary set of key/value pairs, which in practice are almost always in string format, but specific value types e.g. integer and GUID are allowed. This is often as little as an API Key, which is an unformatted string. The LLM connector also specifies the name of the LLM/connector.
 
+## Abstraction
+Each LLM connector, corresponding to a specific LLM provider, defines the following operations:
+
 ## Operations
 - Get LLM connector name
 - Get list of configuration keys and types
+- Get list of available models
 - Set configuration from secure storage, given a secure storage wrapper
 - Validate existing configuration e.g. by connecting to LLM service
-- Execute query, with the following parameters:
-  - System Message: Gives the LLM's role and ancillary data, e.g. "You are a world-building assistant; you are going to make a ZWorld object from this description of a fictional world: ..."
-  - Action Message: Specifies the current desired action, e.g. "Create a ZWorld from your given world description."
-  - Tool: Specifies a tool that should be invoked for the given request; Z-Forge will make no requests that allow 0-n of a set of tools to be used, but rather knows exactly when a given tool is needed.
+- `get_model(model_name: str | None) -> BaseChatModel` — returns a configured LangChain `BaseChatModel` instance for the given model (or the connector's default when `None`). Graph nodes are responsible for constructing messages and invoking the model directly. Two patterns are used:
+  - **Plain-text routing** (e.g. World Creation): the node calls `model.invoke([SystemMessage(...), HumanMessage(...)])` and parses the text response; routing decisions are made by conditional edge functions that inspect graph state.
+  - **Tool-call routing** (e.g. Experience Generation): the node calls `model.bind_tools(tools).invoke(messages)`; a `ToolNode` executes the selected tool and its return value drives graph state transitions. This pattern is used when the LLM should select among named actions.
 
-### Conversation Model
-The LLM abstraction layer does **not** maintain conversation history. Each call to `execute` is a standalone request:
-- System prompts are constructed from the current Process state and relevant artifacts
-- A single user/action prompt spurs the desired action
-- The LLM responds with a tool call that is processed through the MCP server
-- The tool updates Process state, and the orchestration layer determines the next call
 
-This stateless approach means:
-- Agents are not aware of retry iterations; the application handles retry logic discretely
-- Each call includes all context needed for that step via the system prompt
-- Artifacts (Outline, Script, etc.) are passed in their entirety when needed
+  ## Implementation
 
-**TODO**: No specific plan is in place regarding token limits. Large artifacts (e.g., lengthy scripts or detailed ZWorlds) may exceed model context windows. Consider implementing: artifact summarization, chunking strategies, or model selection based on context requirements. 
+  ### Integration with LangGraph
+  Connectors integrate with LangGraph by returning a LangChain `BaseChatModel` via `get_model()`. Graph nodes hold a reference to the connector and call `get_model()` lazily (on first invocation) so that graph construction does not trigger network calls.
 
-## MCP Server and Tool Invocation
-When an LLM connector has been asked to execute a query with a specified tool, this will be executed via an MCP server set up using flutter_mcp_server. The LLM Connector is responsible for translating any tool calls received into MCP tool calls and then executing that call via the Singleton ZForgeMcpServer.
+  - For plain-text routing nodes, the node calls `model.invoke(messages)` and a conditional edge function reads graph state to decide the next node.
+  - For tool-call routing nodes (agentic RAG), the node calls `model.bind_tools(tools).invoke(messages)` and iterates `response.tool_calls` directly via the Processes.md self-loop pattern (e.g. World Generation Summarizer). Tool functions are invoked inline and `ToolMessage`s are appended manually — no `ToolNode` is used.
+  - Chunk parallelism in World Creation is currently implemented with `ThreadPoolExecutor` inside a single graph node. The LangGraph-native alternative is the [Send API](https://langchain-ai.github.io/langgraph/concepts/low_level/#send) (fan-out / map-reduce), which would make parallelism visible to the LangGraph runtime. This is a candidate future refactor.
 
-ZForgeMcpServer provides the following tools:
-- CreateZWorld, which creates an instance of a ZWorld given values for all of the properties of a ZWorld as specified in the [specs file]("Data and File Specifications.md"), and calls the application's Singleton ZWorldManager's CreateZWorld method.
+  ### APIs
+  Connectors are provided for the following API's:
+  - OpenAI
+  - Google
+  - Anthropic
+  - Groq (`langchain-groq` / `ChatGroq`; default model `llama-3.3-70b-versatile`; used as the default provider for document-parsing contextualization and Ask About World / librarian)
+  Each one only needs an API key specified for that vendor, which must be stored in platform-specific secure storage.
+  Each should be implemented with a package, if possible, rather than direct HTTP requests.
+  Each one, if the provider allows for it, should call an API to get a list of model names the first time that this list is requested on each run of the application. For vendors that do not provide such an API, the list should be hard-coded based on available models at compile time (when the connector is created or updated).
+
+  **Groq model list (implementation note):** The `groq` Python SDK exposes `groq.Groq(api_key=...).models.list()`. The connector filters out non-chat models by excluding IDs containing: `whisper`, `tts`, `embed`, `guard`, `vision`. Fallback list (as of March 2026): `llama-3.3-70b-versatile`, `llama-3.3-70b-specdec`, `llama-3.1-8b-instant`, `llama-3.1-70b-versatile`, `gemma2-9b-it`, `qwen-qwq-32b`, `deepseek-r1-distill-llama-70b`, `deepseek-r1-distill-qwen-32b`, `mistral-saba-24b`.
+
+  **OpenAI model list (implementation note):** The `openai` Python SDK exposes `openai.OpenAI(api_key=...).models.list()`, which returns _all_ models including non-chat types (image, audio, TTS, realtime, moderation, embeddings, Codex, Sora, etc.). The connector must filter this list to text-chat-completion models only. The current filter rule: include model IDs that start with `gpt-` or with `o` followed by a digit, and exclude any ID containing: `tts`, `transcribe`, `audio`, `realtime`, `image`, `search`, `moderation`, `embedding`, `dall-e`, `whisper`, `sora`, `babbage`, `davinci`, `codex`, `deep-research`, `computer-use`, `oss`, `chat-latest`. This fetch is performed synchronously and cached per process run; if the key is absent or the call fails, the hardcoded fallback list is used. The cached list is invalidated when the API key changes (e.g. via `set_api_key()`). Fallback list (as of March 2026): `gpt-5.4`, `gpt-5.4-pro`, `gpt-5-mini`, `gpt-5-nano`, `gpt-5`, `gpt-4.1`, `gpt-4o`, `gpt-4o-mini`.
+
+  ### Local Execution
+  Local connectors provide an offline option (chat inference and embeddings) when a GGUF model is configured. The list of models is based on the GGUF files that have been downloaded.
