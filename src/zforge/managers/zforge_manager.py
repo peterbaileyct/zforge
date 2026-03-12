@@ -336,7 +336,11 @@ class ZForgeManager:
         }
 
         log.info("start_experience_generation: calling run_process")
-        result = await self.run_process(initial_state=initial_state, graph=self._experience_generation_graph, on_status_update=on_progress)
+        result = await self.run_process(
+            graph=self._experience_generation_graph,
+            initial_state=initial_state,
+            on_status_update=on_progress,
+        )
         log.info("start_experience_generation: run_process returned status=%r", result.get("status"))
 
         if result.get("status") == "complete":
