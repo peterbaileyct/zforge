@@ -10,7 +10,6 @@ docs/Local LLM Execution.md.
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 
 from langchain_core.embeddings import Embeddings
@@ -78,7 +77,7 @@ class LlamaCppEmbeddingConnector(EmbeddingConnector):
         from langchain_community.embeddings import LlamaCppEmbeddings
 
         path = self._resolve_path()
-        self._embeddings = LlamaCppEmbeddings(
+        self._embeddings = LlamaCppEmbeddings(  # type: ignore[reportCallIssue]
             model_path=str(path),
             n_ctx=self._context_size,
             n_gpu_layers=self._gpu_layers,
@@ -86,7 +85,7 @@ class LlamaCppEmbeddingConnector(EmbeddingConnector):
         )
         return self._embeddings
 
-    def model_identity(self) -> dict:
+    def model_identity(self) -> dict[str, str | int]:
         """Return model basename and file size for KVP storage."""
         path = self._resolve_path()
         return {

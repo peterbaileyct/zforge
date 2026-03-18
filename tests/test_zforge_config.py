@@ -99,9 +99,9 @@ class TestConfigServiceDefaults:
         assert summarizer.model == "gemini-2.5-flash-lite"
 
         assert "document_parsing" in config.llm_nodes
-        ctx = config.llm_nodes["document_parsing"]["contextualizer"]
+        esum = config.llm_nodes["document_parsing"]["entity_summarizer"]
         gext = config.llm_nodes["document_parsing"]["graph_extractor"]
-        assert ctx.provider == "Google"
+        assert esum.provider == "Google"
         assert gext.provider == "Google"
 
     def test_apply_defaults_preserves_existing(self):
@@ -118,7 +118,7 @@ class TestConfigServiceDefaults:
         # summarizer should be preserved
         assert config.llm_nodes["world_generation"]["summarizer"].provider == "Anthropic"
         # document_parsing nodes should be filled in
-        assert config.llm_nodes["document_parsing"]["contextualizer"].provider == "Google"
+        assert config.llm_nodes["document_parsing"]["entity_summarizer"].provider == "Google"
 
     def test_apply_defaults_preserves_other_processes(self):
         """_apply_defaults doesn't touch nodes for other processes."""

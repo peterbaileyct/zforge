@@ -92,11 +92,11 @@ class PreferencesScreen:
             scroll=ft.ScrollMode.AUTO,
         )
 
-    def _on_slider_change(self, field_name: str, e: ft.ControlEvent) -> None:
-        self._slider_labels[field_name].value = str(int(e.control.value))
+    def _on_slider_change(self, field_name: str, e: ft.Event[ft.Slider]) -> None:
+        self._slider_labels[field_name].value = str(int(e.control.value or 0))
         self._page.update()
 
-    def _on_save(self, e: ft.ControlEvent) -> None:
+    def _on_save(self, e: ft.Event[ft.Button]) -> None:
         config_svc = self._state.config_service
         if config_svc is None:
             return
@@ -106,7 +106,7 @@ class PreferencesScreen:
             setattr(
                 config.preferences,
                 field_name,
-                int(self._sliders[field_name].value),
+                int(self._sliders[field_name].value or 5),
             )
         config.preferences.general_preferences = self._general_input.value
         config_svc.save(config)

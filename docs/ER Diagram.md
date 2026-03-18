@@ -68,7 +68,7 @@ erDiagram
 
 Z-Worlds are persisted as Z-Bundles at `bundles/world/{slug}/`:
 - `kvp.json` — key-value metadata (title, slug, UUID, summary, setting_era, source_canon, content_advisories, embedding model identity)
-- `source.txt` — original raw input text
+- `raw.txt` — original raw input text
 - `vector/` — LanceDB vector store (document chunk embeddings; table name `chunks`)
 - `propertygraph` — KùzuDB property graph file (schema-less entity nodes and relationship edges, managed by `KuzuGraph.add_graph_documents`)
 
@@ -84,7 +84,7 @@ erDiagram
         string path "kvp.json"
     }
     SourceText {
-        string path "source.txt"
+        string path "raw.txt"
     }
     VectorStore {
         string path "vector/"

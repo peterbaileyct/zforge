@@ -1,35 +1,144 @@
-# RAG and GRAG implementation
-Data stored for RAG uses an optional key-value store, an optional vector store, and an optional property graph; if the property graph exists, there must be a vector store, and the property graph will link to a referenced text chunk in the vector store from each node. We call this hybrid data set a Z-Bundle. It has both a slug for the bundle itself (e.g. the slug for a Z-World) and for the type (e.g. "world")
+# RAG and GRAG Implementation
 
-## Specifications
-When a [Process](Processes.md) requires access to a Z-Bundle, the type of the Z-Bundle is specified in the process definition, and the data structure of the type of Z-Bundle is specified in a separate file (e.g. [Z-World](Z-World.md), as a Z-World is a type of Z-Bundle referenced as an output of the World Generation process and an input to the Experience Generation process.)
+A Z-Bundle is a hybrid data set consisting of up to four complementary stores: an optional raw text file, an optional key-value store, an optional vector store, and an optional property graph. If a vector store is present, a property graph must also be present; every vector entity links back to the node in the property graph. A Z-Bundle has both a type slug (e.g. `"world"`) and an instance slug (e.g. `"wayfarers"`).
 
-Any Z-Bundle that contains a vector store **must** record the identity of the embedding model used to encode it in the KVP store (as `embedding_model_name` and `embedding_model_size_bytes`). This allows the application to detect when the currently configured embedding model differs from the one used at encoding time. See [Local LLM Execution](Local%20LLM%20Execution.md) for the mismatch policy.
+The ontology for a bundle -- the specific entity types, relationship types, and KVP fields -- for any given Z-Bundle type are defined in that type's own spec (e.g. [Z-World](Z-World.md)). This document covers the structure, schema contracts, and retrieval patterns that apply to **all** Z-Bundle types.
+
+## Z-Bundle Structure
+
+Each Z-Bundle is stored at `bundles/{typeslug}/{slug}/` — e.g. `bundles/world/wayfarers`. All paths below are relative to this root.
+
+| Path | Contents |
+|---|---|
+| `raw.txt` | Raw text |
+| `kvp.json` | Key-value metadata in JSON format |
+| `vector/` | LanceDB vector store |
+| `propertygraph` | KùzuDB property graph file (not a directory) |
+
+When a [Process](Processes.md) requires access to a Z-Bundle it declares the Z-Bundle type; the expected data structure for that type is specified in the type's own spec file.
+
+Any Z-Bundle that contains a vector store **must** record the identity of the embedding model used to encode it in the KVP store (`embedding_model_name`, `embedding_model_size_bytes`). This allows the application to detect when the currently configured embedding model differs from the one used at encoding time. See [Local LLM Execution](Local%20LLM%20Execution.md) for the mismatch policy.
+
+## Schema
+
+### Vector
+
+Two LanceDB tables are written per Z-Bundle. Both share the same column schema:
+
+| Column | Type | Description |
+|---|---|---|
+| `vector` | `float32[]` | Embedding vector |
+| `entity_id` | `STRING` | For `chunks`: the KuzuDB `Chunk.id` of the source chunk. For `entities`: the KuzuDB entity node `id` directly. |
+| `entity_type` | `STRING` | snake_case node type (see [Z-World § entity_type Casing](Z-World.md#entity_type-casing-lancedb--kuzu)). For `entities` rows, the entity's own type (e.g. `character`). For `chunks` rows, the primary entity type of the source chunk. |
+| `text` | `STRING` | The raw chunk text (`chunks`) or the LLM-synthesized entity summary (`entities`). |
+
+**`chunks` table** — one row per retrieval sub-chunk from Phase 3 of the parsing pipeline. The `entity_id` is the KuzuDB `Chunk` node id. This is the ground-truth verbatim record and is used for precise source passage retrieval.
+
+**`entities` table** — one row per entity node from Phase 5 (entity summarization). The `entity_id` is the entity's KuzuDB node `id` (e.g. a `Character` id). This table is used as the default for entity-centric queries — a single call to `query_world` returns a synthesized 1–5 paragraph summary of the entity plus its graph neighbourhood without a follow-up call. If Phase 5 is skipped (`entity_summarization_enabled = false`), this table is absent and `query_world` falls back to the `chunks` table.
+
+### Graph
+
+KuzuDB uses a strict typed schema managed by `_MultiTypeKuzuGraph` (see Implementation). The schema for a given Z-Bundle type is governed by the `allowed_nodes` and `allowed_relationships` lists declared in that type's spec. **These lists must be defined at design time and must not change after a Z-Bundle instance has been written** — any change requires re-parsing the source document.
+
+**Node tables** — one table per entry in `allowed_nodes`. Every node table has at minimum:
+- `id` (`STRING`, primary key) — stable entity identifier; must match `entity_id` in LanceDB for any chunk derived from this entity.
+- `type` (`STRING`) — the node's type label (redundant with the table name; retained for compatibility with `LLMGraphTransformer`).
+- `text` (`STRING`) — a brief natural-language description of the entity, populated when the LLM extraction provides one. May be empty.
+
+**Relationship table groups** — one group per relationship type in `allowed_relationships`, spanning the full cross-product of `allowed_nodes` pairs. Relationship types encode domain semantics (e.g. `member_of`, `located_at`); they are defined per Z-Bundle type spec.
+
+**`Chunk` node table** — always present when a property graph exists (`include_source=True`):
+- `id` (`STRING`, primary key) — matches `entity_id` in the corresponding LanceDB row.
+- `text` (`STRING`) — the chunk's prose text.
+- `type` (`STRING`) — always `"Chunk"`.
+
+**`MENTIONS` relationship table group** — edges from every `Chunk` node to every entity node extracted from that chunk. This is the structural bridge between the two stores.
+
+### Cross-Reference Contract
+
+`entity_id` in LanceDB and `id` in the KuzuDB `Chunk` table are the **same value** for the same source chunk. This contract enables joined retrieval without a secondary lookup layer:
+
+```
+LanceDB row (entity_id = "chunk-42")
+    ↕  same id
+KuzuDB Chunk node (id = "chunk-42")
+    ↕  MENTIONS edges
+KuzuDB entity nodes (Character, Location, …)
+```
+
+Code that writes to either store must preserve this contract. Code that queries either store may exploit it to avoid redundant LLM round-trips (see Retrieval Patterns).
+
+## Retrieval Patterns
+
+These patterns apply to any [Process](Processes.md) that queries a Z-Bundle. They are listed in order of increasing specificity and decreasing LLM round-trip cost.
+
+### Unified Entity Query (`query_world`) — primary tool
+
+```
+query_world(query: str, entity_type: str | None = None, k: int = 3, include_neighbors: bool = False) → str
+```
+
+Resolves a natural-language question to a structured response in a single tool call by combining semantic entity matching, graph neighbourhood expansion, and optional neighbour summary hydration:
+
+1. **Semantic match:** Run vector similarity search against the `entities` table to find the top-`k` matching entity summaries. If `entity_type` is provided, apply a LanceDB `where` clause to restrict to that type. If the `entities` table is absent (Phase 5 was skipped), fall back to the `chunks` table.
+2. **Graph expansion:** For each matched entity, look up its 1-hop graph neighbourhood in KuzuDB — all incoming and outgoing non-Chunk edges, including relationship type, direction, neighbour id, neighbour type, and any populated relationship properties.
+3. **Neighbour hydration (optional):** If `include_neighbors=True`, fetch the `entities` table row for each unique neighbour to include its summary text alongside its own 1-hop relationships. Capped at `k` neighbour summaries per matched entity to avoid context overflow.
+
+Return format (structured text):
+
+```
+[Entity: "Ankh-Morpork" (location)]
+Summary: Ankh-Morpork is the largest city on the Disc…
+
+Relationships:
+  → located_in → The Disc (region)
+  ← based_in ← City Watch (organization)  [role: law enforcement]
+  ← controls ← Lord Vetinari (character)  [from_time: "the Interregnum"]
+
+[Neighbour: "Lord Vetinari" (character)]  ← only if include_neighbors=True
+Summary: Havelock Vetinari is the Patrician of Ankh-Morpork…
+Relationships:
+  → controls → Ankh-Morpork (location)
+  …
+```
+
+This is the default tool for all world-querying agents. A typical entity-centric question ("who is X?", "what does Y control?") resolves in a single call. Use `include_neighbors=True` for network questions ("who does X know?", "what is connected to Y?").
+
+### Verbatim Source Retrieval (`retrieve_source`)
+
+```
+retrieve_source(query: str, entity_type: str | None = None, k: int = 5) → list[str]
+```
+
+Semantic similarity search against the `chunks` table only. Returns raw source sub-chunks for verbatim fact retrieval. Use when the question requires exact wording (contradictions, rumours, specific quotes) or when entity summaries may over-synthesize details. The optional `entity_type` filter applies a LanceDB `where` clause to restrict to chunks whose primary entity is of that type.
+
+### Vector-Seeded Graph Expansion (code pattern)
+
+Use the vector store to find semantically relevant chunks, then expand their entity neighbourhood in the property graph. This is a code-level pattern for custom queries, not a bound LLM tool:
+
+1. Run `retrieve_source` (optionally filtered) to obtain top-k chunk `entity_id` values.
+2. Execute a Cypher query in KuzuDB: `MATCH (c:Chunk) WHERE c.id IN $ids MATCH (c)-[:MENTIONS]->(n)-[r]-(m) WHERE NOT label(m) = 'Chunk' RETURN …`
+
+This surfaces the structured relationships *around* the semantically matching passages — useful for custom queries where the question involves connections between entities rather than descriptions of a single entity.
+
+### Hybrid BM25 + Semantic Search (future)
+
+LanceDB supports full-text (BM25) indexing alongside vector indexing on the same table. Combining both scores via Reciprocal Rank Fusion (RRF) improves precision for proper-noun-heavy queries (entity names that embed poorly relative to their importance). This pattern is not yet implemented but requires no schema changes — the existing `chunks` table supports it.
 
 ## Implementation
-Each Z-Bundle is stored in "bundles/{typeslug}/{slug}", e.g. "bundles/world/wayfarers". Henceforth, the "root path" or "root".
 
-Key-Value data is recorded in "{root}/kvp.json", in JSON format.
+Each Z-Bundle is stored in `bundles/{typeslug}/{slug}/` on the local filesystem (see [File Storage](File%20Storage.md) for the resolved base path).
 
-Vector stores are recorded in a LanceDB database in "{root}/vector/". The LanceDB table within every Z-Bundle is named **`chunks`**. Each row has the following columns:
-- `vector`: embedding array (produced by the [embedding model](Local%20LLM%20Execution.md))
-- `entity_id`: stable string identifier, shared with the property graph node
-- `entity_type`: string label (e.g., `"character"`, `"location"`)
-- `text`: the serialized natural-language chunk text
+The `make_world_query_tools(z_bundle_root, allowed_node_labels, embedding_connector)` factory in `graph_utils.py` constructs and returns both `query_world` and `retrieve_source` as a tuple. It takes `allowed_node_labels` as a parameter (the same `allowed_nodes` list used at ingest time) so the graph keyword branch can query the correct set of node tables without hardcoding them. **Each Z-Bundle type that uses these tools must pass its own `allowed_nodes` list when constructing them.**
 
-Property graphs are recorded in a KùzuDB database file at `{root}/propertygraph`. The schema is managed entirely by `KuzuGraph.add_graph_documents` (from `langchain_community.graphs`), which creates:
-- **Per-type node tables** — one node table per entity type in `allowed_nodes` (e.g., `Character`, `Location`, `Event`, `Faction`). Node properties include at minimum `id` and `text`.
-- **Per-type-pair relationship tables** — one rel table per (source-type, relationship-type, target-type) triple encountered in the extracted data. The relationship type is encoded in the table name rather than stored as a column.
-- **`Chunk` node table** (when `include_source=True`) — one node per source text chunk, with edges from every extracted entity node back to the chunk it was extracted from, enabling hybrid lookup: given any entity, retrieve the original passage.
+### Pitfall: `query_world` graph expansion must execute queries, not just return the schema
 
-### Pitfall: `retrieve_graph` must execute queries, not just return the schema
+A naive implementation that returns only `graph.get_schema` for the graph expansion step wastes a full LLM round-trip: the model receives schema with no data and retries. The schema dump is also misleading when the tool docstring advertises entity and relationship lookup.
 
-A naive implementation of `retrieve_graph` that returns only `graph.get_schema` wastes a full LLM round-trip: the model receives the schema, realises it contains no data, and immediately calls `retrieve_vector` instead. The schema dump is also misleading — the docstring advertises "A Cypher-style query or entity name to look up", but nothing is actually looked up.
-
-**The correct pattern** (implemented in `graph_utils.make_retrieve_graph_tool`) has two branches:
+**The correct pattern** (implemented as the graph expansion step in `graph_utils.make_world_query_tools`) has two branches:
 
 1. **Cypher branch** — if the query begins with a Cypher keyword (`MATCH`, `WITH`, `CALL`, etc.), execute it via `KuzuGraph.query(cypher)`, which delegates to `kuzu.Connection.execute()`. Return the rows directly (up to 50). On error or empty results, append the schema so the model can correct the query.
 
-2. **Keyword branch** — otherwise, search the `id` property of every standard entity node table case-insensitively via `toLower(n.id) CONTAINS $kw`, using `KuzuGraph.query(cypher, params={"kw": keyword})` (parameterised queries are supported). For each matched entity, expand one hop of outgoing and incoming edges — excluding `Chunk` nodes — and include relationship type via `type(r)` and neighbour type via `label(m)`. Return schema only when no entities match.
+2. **Keyword branch** — otherwise, search the `id` property of every node table in `allowed_node_labels` case-insensitively via `toLower(n.id) CONTAINS $kw`, using `KuzuGraph.query(cypher, params={"kw": keyword})` (parameterised queries are supported). For each matched entity, expand one hop of outgoing and incoming edges — excluding `Chunk` nodes — and include relationship type via `type(r)` and neighbour type via `label(m)`. Return schema only when no entities match.
 
-This ensures that for factual questions (e.g. "who are the queens?"), the graph tool returns the matched `Character` nodes and their relationships directly, often eliminating the need for a `retrieve_vector` call and saving an LLM round-trip (~1–2 s on Groq).
+This ensures that for factual questions (e.g. "who are the queens?"), the graph expansion returns matched entity nodes and their relationships directly as part of the `query_world` response, eliminating the need for a second tool call (~1–2 s saved on Groq).

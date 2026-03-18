@@ -3,7 +3,7 @@
 Z-Worlds are stored as Z-Bundles at bundles/world/{slug}/ containing:
 - kvp.json: title, slug, UUID, summary, setting_era, source_canon,
   content_advisories, embedding model identity
-- source.txt: original raw input text
+- raw.txt: original raw input text
 - vector/: LanceDB vector store (populated by document_parsing_graph)
 - propertygraph: KùzuDB property graph file (populated by document_parsing_graph)
 
@@ -25,6 +25,7 @@ from zforge.models.zworld import ZWorld
 
 if TYPE_CHECKING:
     from zforge.services.embedding.embedding_connector import EmbeddingConnector
+    from zforge.services.llm.llm_connector import LlmConnector
 
 log = logging.getLogger(__name__)
 
@@ -58,7 +59,7 @@ class ZWorldManager:
 
         The vector store and property graph are populated by the
         document_parsing_graph before this method is called; ``create()``
-        only writes ``kvp.json`` and ``source.txt``.
+        only writes ``kvp.json`` and ``raw.txt``.
         """
         root = self._world_root(zworld.slug)
         os.makedirs(root, exist_ok=True)
@@ -89,7 +90,7 @@ class ZWorldManager:
             json.dump(kvp, f, indent=2)
 
     def _write_source(self, root: Path, raw_text: str) -> None:
-        source_path = root / "source.txt"
+        source_path = root / "raw.txt"
         with open(source_path, "w", encoding="utf-8") as f:
             f.write(raw_text)
 
@@ -119,6 +120,18 @@ class ZWorldManager:
             source_canon=kvp.get("source_canon", []),
             content_advisories=kvp.get("content_advisories", []),
         )
+
+    def read_source(self, slug: str) -> str | None:
+        """Read and return the contents of raw.txt for the given world.
+
+        Returns None if the file does not exist.
+        """
+        root = self._world_root(slug)
+        source_path = root / "raw.txt"
+        if not source_path.exists():
+            return None
+        with open(source_path, "r", encoding="utf-8") as f:
+            return f.read()
 
     # ------------------------------------------------------------------
     # CHECK EMBEDDING MISMATCH
@@ -174,7 +187,8 @@ class ZWorldManager:
         self,
         slug: str,
         question: str,
-        llm_connector,
+        llm_connector: LlmConnector,
+        allowed_node_labels: list[str],
         model_name: str | None = None,
     ) -> str:
         """Answer a question about a world using agentic RAG.
@@ -190,6 +204,8 @@ class ZWorldManager:
             Raw user question text.
         llm_connector:
             Pre-resolved LLM connector for the Librarian node.
+        allowed_node_labels:
+            PascalCase node type names for graph queries.
         model_name:
             Optional model name override.
 
@@ -214,6 +230,7 @@ class ZWorldManager:
             user_question=question,
             llm_connector=llm_connector,
             embedding_connector=self._embedding,
+            allowed_node_labels=allowed_node_labels,
             model_name=model_name,
         )
 

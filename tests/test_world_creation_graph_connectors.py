@@ -1,7 +1,7 @@
 """Tests for per-node LLM connector resolution in world creation graph.
 
 Verifies that build_create_world_graph() correctly wires connectors
-for the summarizer, contextualizer, and graph_extractor nodes, and that
+for the summarizer, entity_summarizer, and graph_extractor nodes, and that
 ZForgeManager._resolve_node_connector() handles overrides and fallbacks.
 """
 
@@ -42,7 +42,7 @@ class TestBuildCreateWorldGraphPerNode:
     def test_graph_builds_with_all_connectors(self):
         """build_create_world_graph accepts the new connector signature."""
         sum_conn = _make_mock_connector("SummarizerProvider")
-        ctx_conn = _make_mock_connector("ContextualizerProvider")
+        esum_conn = _make_mock_connector("EntitySummarizerProvider")
         gext_conn = _make_mock_connector("GraphExtractorProvider")
         emb = _make_mock_embedding()
         mgr = MagicMock()
@@ -52,15 +52,15 @@ class TestBuildCreateWorldGraphPerNode:
 
         graph = build_create_world_graph(
             summarizer_connector=sum_conn,
-            contextualizer_connector=ctx_conn,
             graph_extractor_connector=gext_conn,
+            entity_summarizer_connector=esum_conn,
             embedding_connector=emb,
             zworld_manager=mgr,
             config=config,
             bundles_root="/tmp/test-bundles",
             summarizer_model="model-a",
-            contextualizer_model="model-b",
             graph_extractor_model="model-c",
+            entity_summarizer_model="model-d",
         )
         assert graph is not None
 
@@ -142,7 +142,7 @@ class TestResolveNodeConnector:
                     "summarizer": LlmNodeConfig(provider="OpenAI", model="gpt-5-nano"),
                 },
                 "document_parsing": {
-                    "contextualizer": LlmNodeConfig(provider="Google", model="gemini-2.5-flash-lite"),
+                    "entity_summarizer": LlmNodeConfig(provider="Google", model="gemini-2.5-flash-lite"),
                     "graph_extractor": LlmNodeConfig(provider="Google", model="gemini-2.5-flash-lite"),
                 },
             }
@@ -150,13 +150,13 @@ class TestResolveNodeConnector:
         mgr = self._make_manager(config, registry)
 
         sum_conn, sum_model = mgr._resolve_node_connector("world_generation", "summarizer")
-        ctx_conn, ctx_model = mgr._resolve_node_connector("document_parsing", "contextualizer")
+        esum_conn, esum_model = mgr._resolve_node_connector("document_parsing", "entity_summarizer")
         gext_conn, gext_model = mgr._resolve_node_connector("document_parsing", "graph_extractor")
 
         assert sum_conn is openai
         assert sum_model == "gpt-5-nano"
-        assert ctx_conn is google
-        assert ctx_model == "gemini-2.5-flash-lite"
+        assert esum_conn is google
+        assert esum_model == "gemini-2.5-flash-lite"
         assert gext_conn is google
 
     def test_empty_provider_falls_back_to_default(self):

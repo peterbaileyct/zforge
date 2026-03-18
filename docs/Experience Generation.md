@@ -28,7 +28,8 @@ flowchart TD
 
     %% Subgraph: External Tools
     subgraph Tools [External Tools & Services]
-        T1{{Z-World Hybrid Data Store}}
+        T1_qw{{query_world}}
+        T1_rs{{retrieve_source}}
         T2{{Ink Compiler}}
     end
 
@@ -39,14 +40,15 @@ flowchart TD
     Node_Outline[outline_author]
     A1 -.-> Node_Outline
     S1 & S2 --> Node_Outline
-    T1 --- Node_Outline
+    T1_qw & T1_rs --- Node_Outline
     Node_Outline --> S3
     Node_Outline --> S3a
 
     Node_Review_Outline{outline_reviewer}
     A2 & A3 -.-> Node_Review_Outline
     S3 & S1 --> Node_Review_Outline
-    
+    T1_qw & T1_rs --- Node_Review_Outline
+
     Node_Review_Outline -- "Logic/Lore Error" --> Node_Outline
     Node_Review_Outline -- "Approved" --> Node_Prose
 
@@ -54,12 +56,13 @@ flowchart TD
     Node_Prose[prose_writer]
     A4 -.-> Node_Prose
     S3 & S3a --> Node_Prose
-    T1 --- Node_Prose
+    T1_qw & T1_rs --- Node_Prose
     Node_Prose --> S4
 
     Node_Review_Prose{prose_reviewer}
     A2 & A3 -.-> Node_Review_Prose
     S4 & S1 --> Node_Review_Prose
+    T1_qw & T1_rs --- Node_Review_Prose
 
     Node_Review_Prose -- "Tone/Lore/Logic Fix" --> Node_Prose
     Node_Review_Prose -- "Approved" --> Node_Script
@@ -113,16 +116,16 @@ The following are provided as inputs to the graph at entry:
 > **Note:** LLM prompts for each agent role are forthcoming and will be added here before implementation.
 
 * **Outliner (Narrative Designer)** — node: `outline_author`, default: `Google` / `gemini-2.5-flash`
-    * Generates the structural beat sheet and extracts factual reference data from the Z-World hybrid data store. Also defines the **experience title**, which is stored in state; the graph derives a kebab-case slug from this title (e.g. `"The Heist at Ironhaven"` → `the-heist-at-ironhaven`) for use in output file naming.
+    * Generates the structural beat sheet and extracts factual reference data from the Z-World hybrid data store. Also defines the **experience title**, which is stored in state; the graph derives a kebab-case slug from this title (e.g. `"The Heist at Ironhaven"` → `the-heist-at-ironhaven`) for use in output file naming. Has access to `query_world` and `retrieve_source` tools (see [Retrieval Patterns](RAG%20and%20GRAG%20Implementation.md#retrieval-patterns)).
         * Prompt:
         ```
         You are a Lead Narrative Designer. Convert world data and player intent into a structural "beat sheet."
-        1.	Query the Z-World hybrid data store to gather specific keys relevant to the prompt.
+        1.	Query the Z-World hybrid data store using query_world to gather entities and relationships relevant to the prompt.
         2.	Create Outline (S3): Structured Markdown of scenes and branching points (using === knot_names ===).
-        3.	Create Research Notes (S3a): A bulleted list of factual data retrieved from the Z-World KV Store(e.g., location.capital.weather: frozen). Keep these distinct from the outline.
+        3.	Create Research Notes (S3a): A bulleted list of factual data retrieved from the Z-World store (e.g., location name, notable traits, key relationships). Keep these distinct from the outline.
         4.	Adhere to the Player Preference scale (1-10).        
 * **Technical Editor (Internal Consistency)** — nodes: `outline_reviewer`, `prose_reviewer`, default: `Anthropic` / `claude-haiku-4-5`
-    * Acts as the "Logic Police." Monitors internal plot consistency, pacing, and ensuring branching choices have actual narrative value.
+    * Acts as the "Logic Police." Monitors internal plot consistency, pacing, and ensuring branching choices have actual narrative value. Does not use retrieval tools (structural review only).
         * Prompt:
         ```
         You are the Logic Police. Your focus is the internal consistency of the story being built.
@@ -131,7 +134,7 @@ The following are provided as inputs to the graph at entry:
         3.	Pacing: Check if the sequence of events feels earned.
         4.	Output: {"status": "PASS/FAIL", "feedback": "Notes on plot logic"}.
 * **Story Editor (World Consistency)** — nodes: `outline_reviewer`, `prose_reviewer`, default: `Anthropic` / `claude-haiku-4-5`
-    * Acts as the "Lore Police." Enforces external consistency by cross-referencing all content against the Z-World KV store metadata and rules.
+    * Acts as the "Lore Police." Enforces external consistency by cross-referencing all content against the Z-World store. Has access to `query_world` and `retrieve_source` tools to verify entity traits, relationships, and verbatim lore details.
         * Prompt:
         ```
         You are the Lore Police. Your focus is the external consistency between the draft and the Z-World KV Store (S1).
@@ -140,11 +143,11 @@ The following are provided as inputs to the graph at entry:
         3.	Tone: Ensure the draft matches the "voice" established in the world metadata.
         4.	Output: {"status": "PASS/FAIL", "feedback": "Notes on Z-World violations"}.
 * **Staff Writer (Author)** — node: `prose_writer`, default: `Anthropic` / `claude-sonnet-4-5`
-    * High-fidelity creative writing. Expands the approved outline into vivid prose and dialogue while adhering to the editors' stylistic and lore-based feedback.
+    * High-fidelity creative writing. Expands the approved outline into vivid prose and dialogue while adhering to the editors' stylistic and lore-based feedback. Has access to `query_world` and `retrieve_source` tools for on-demand character detail, sensory description, and verbatim lore.
         * Prompt:
         ``` 
         You are a Professional Fiction Author. Expand the Outline (S3) into vivid narrative text.
-        1.	Use Research Notes (S3a) (derived from the Z-World data store) for sensory details.
+        1.	Use Research Notes (S3a) and query_world to retrieve additional sensory details, character traits, and relationships as needed.
         2.	Write dialogue and descriptions. Mark choices with [Choice Text].
         3.	Focus on quality of prose while respecting the "World Consistency" notes.
 * **Junior Scripter (Implementation)** — node: `ink_scripter`, default: `Google` / `gemini-2.5-flash`

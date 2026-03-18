@@ -98,3 +98,6 @@ class LlamaCppConnector(LlmConnector):
         )
         log.info("LlamaCppConnector.get_model: model loaded")
         return self._model
+
+    def set_api_key(self, api_key: str) -> None:
+        """No-op — local models do not use API keys."""

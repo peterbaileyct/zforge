@@ -14,8 +14,9 @@ Implements: src/zforge/graphs/state.py per docs/LLM Orchestration.md.
 from __future__ import annotations
 
 import operator
-from typing import Annotated, TypedDict
+from typing import Annotated, Any, TypedDict
 
+from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
 
@@ -26,10 +27,10 @@ class ExperienceGenerationState(TypedDict):
     """
 
     # Inputs (set at initialization)
-    zworld_kvp: dict
+    zworld_kvp: dict[str, Any]
     world_slug: str
     z_bundle_root: str
-    preferences: dict
+    preferences: dict[str, Any]
     player_prompt: str | None
 
     # Artifacts (set by agent nodes during execution)
@@ -60,7 +61,7 @@ class ExperienceGenerationState(TypedDict):
     failure_reason: str | None
 
     # LangGraph message history — for observability
-    messages: Annotated[list, add_messages]
+    messages: Annotated[list[BaseMessage], add_messages]
 
 
 class DocumentParsingState(TypedDict):
@@ -74,8 +75,8 @@ class DocumentParsingState(TypedDict):
     allowed_nodes: list[str]
     allowed_relationships: list[str]
     chunks: list[str]
-    documents: list           # contextualized large-chunk Documents (used for graph ingestion)
-    retrieval_documents: list  # small re-split Documents with breadcrumbs (used for vector ingestion)
+    context_chunks: list[str]
+    retrieval_documents: list[Any]  # list of Document objects with metadata
     current_chunk_index: Annotated[int, operator.add]
     status: str
     status_message: str
@@ -90,13 +91,15 @@ class CreateWorldState(TypedDict):
     input_text: str
     world_uuid: str | None          # Pre-assigned at graph entry; stable across resume
     z_bundle_root: str | None       # worlds-in-progress/{uuid}/ until finalised
-    zworld_kvp: dict | None
+    zworld_kvp: dict[str, Any] | None
     conflicting_slug: str | None    # Set by duplicate_check if a same-title world exists
     overwrite_decision: str | None  # "overwrite" | "cancel" | None
+    locked_slug: str | None         # If set, Finalizer uses this instead of deriving (reindex)
+    locked_title: str | None        # If set, Finalizer uses this instead of LLM output (reindex)
     status: str
     status_message: str
     failure_reason: str | None
-    messages: Annotated[list, add_messages]
+    messages: Annotated[list[BaseMessage], add_messages]
 
 
 class AskAboutWorldState(TypedDict):
@@ -106,7 +109,7 @@ class AskAboutWorldState(TypedDict):
     """
 
     z_bundle_root: str
-    zworld_kvp: dict
+    zworld_kvp: dict[str, Any]
     user_question: str
     answer: str
-    messages: Annotated[list, add_messages]
+    messages: Annotated[list[BaseMessage], add_messages]

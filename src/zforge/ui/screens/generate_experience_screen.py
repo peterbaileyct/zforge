@@ -8,7 +8,7 @@ docs/User Experience.md.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import flet as ft
 
@@ -56,25 +56,26 @@ class GenerateExperienceScreen:
             on_click=self._on_generate,
         )
 
+        gen_controls: list[ft.Control] = [
+            ft.Text("Generate Experience", size=16, weight=ft.FontWeight.BOLD),
+            ft.Text(f"World: {self._zworld.title}"),
+            ft.Text("Player Prompt (optional):"),
+            self._prompt_input,
+            self._generate_btn,
+            ft.ElevatedButton("Back", on_click=self._on_back),
+            self._progress_label,
+            self._rationale_label,
+            self._action_log,
+        ]
         self._root = ft.Column(
-            [
-                ft.Text("Generate Experience", size=16, weight=ft.FontWeight.BOLD),
-                ft.Text(f"World: {self._zworld.title}"),
-                ft.Text("Player Prompt (optional):"),
-                self._prompt_input,
-                self._generate_btn,
-                ft.ElevatedButton("Back", on_click=self._on_back),
-                self._progress_label,
-                self._rationale_label,
-                self._action_log,
-            ],
+            gen_controls,
             spacing=10,
             expand=True,
             scroll=ft.ScrollMode.AUTO,
         )
         return self._root
 
-    def _on_generate(self, e: ft.ControlEvent) -> None:
+    def _on_generate(self, e: ft.Event[ft.Button]) -> None:
         self._generate_btn.disabled = True
         self._progress_label.value = "Starting experience generation..."
         self._page.update()
@@ -94,12 +95,18 @@ class GenerateExperienceScreen:
             self._progress_label.value = msg
             self._page.update()
 
+        def on_rationale(msg: str, entry: dict[str, Any]) -> None:
+            self._rationale_label.value = msg
+            self._action_log.value += f"\n- {msg}"
+            self._page.update()
+
         try:
             log.info("_run_generation: calling start_experience_generation")
             experience = await mgr.start_experience_generation(
                 world_slug=self._zworld.slug,
                 player_prompt=player_prompt,
                 on_progress=on_update,
+                on_rationale=on_rationale,
             )
             log.info("_run_generation: start_experience_generation returned %r", type(experience))
 
@@ -122,13 +129,13 @@ class GenerateExperienceScreen:
             self._generate_btn.disabled = False
             self._page.update()
 
-    def _on_play(self, e: ft.ControlEvent) -> None:
+    def _on_play(self, e: ft.Event[ft.Button]) -> None:
         from zforge.app import navigate
         from zforge.ui.screens.gameplay_screen import GameplayScreen
 
         screen = GameplayScreen(self._page, self._state, experience=self._last_experience)
         navigate(self._page, screen.build())
 
-    def _on_back(self, e: ft.ControlEvent) -> None:
+    def _on_back(self, e: ft.Event[ft.Button]) -> None:
         if self._on_done:
             self._on_done()

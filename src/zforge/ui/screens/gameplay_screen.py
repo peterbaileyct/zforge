@@ -46,23 +46,26 @@ class GameplayScreen:
         self._text_input = ft.TextField(
             hint_text="Enter choice number or tap above",
             expand=True,
-            on_submit=self._on_submit_input,
+            on_submit=lambda _: self._on_submit_input(),
         )
 
+        input_row: list[ft.Control] = [
+            self._text_input,
+            ft.ElevatedButton("↵", on_click=lambda _: self._on_submit_input(), width=50),
+        ]
+        nav_row: list[ft.Control] = [
+            ft.ElevatedButton("Save", on_click=self._on_save),
+            ft.ElevatedButton("Restore", on_click=self._on_restore),
+            ft.ElevatedButton("Home", on_click=self._on_home),
+        ]
+        root_controls: list[ft.Control] = [
+            self._transcript,
+            self._choices_box,
+            ft.Row(input_row),
+            ft.Row(nav_row),
+        ]
         root = ft.Column(
-            [
-                self._transcript,
-                self._choices_box,
-                ft.Row([
-                    self._text_input,
-                    ft.ElevatedButton("↵", on_click=self._on_submit_input, width=50),
-                ]),
-                ft.Row([
-                    ft.ElevatedButton("Save", on_click=self._on_save),
-                    ft.ElevatedButton("Restore", on_click=self._on_restore),
-                    ft.ElevatedButton("Home", on_click=self._on_home),
-                ]),
-            ],
+            root_controls,
             spacing=8,
             expand=True,
         )
@@ -103,9 +106,10 @@ class GameplayScreen:
             if self._resume and mgr.experience_manager.has_saved_progress(exp.zworld_id, exp.name):
                 saved = mgr.experience_manager.load_progress(exp.zworld_id, exp.name)
                 await if_engine.start_experience(compiled_data)
-                result = await if_engine.restore_state(saved)
-                self._add_game_text(result.text)
-                self._show_choices(result.choices)
+                if saved is not None:
+                    result = await if_engine.restore_state(saved)
+                    self._add_game_text(result.text)
+                    self._show_choices(result.choices)
             else:
                 text = await if_engine.start_experience(compiled_data)
                 state_choices = await if_engine.get_current_choices() if hasattr(if_engine, "get_current_choices") else []
@@ -160,7 +164,7 @@ class GameplayScreen:
             self._choices_box.controls.clear()
             self._page.update()
 
-    def _on_submit_input(self, e: ft.ControlEvent) -> None:
+    def _on_submit_input(self) -> None:
         text = self._text_input.value.strip()
         if text:
             self._text_input.value = ""
@@ -171,7 +175,7 @@ class GameplayScreen:
             except ValueError:
                 pass
 
-    def _on_save(self, e: ft.ControlEvent) -> None:
+    def _on_save(self, e: ft.Event[ft.Button]) -> None:
         self._page.run_task(self._do_save)
 
     async def _do_save(self) -> None:
@@ -184,7 +188,7 @@ class GameplayScreen:
         mgr.experience_manager.save_progress(exp.zworld_id, exp.name, state_bytes)
         self._add_game_text("Progress saved.")
 
-    def _on_restore(self, e: ft.ControlEvent) -> None:
+    def _on_restore(self, e: ft.Event[ft.Button]) -> None:
         self._page.run_task(self._do_restore)
 
     async def _do_restore(self) -> None:
@@ -201,7 +205,7 @@ class GameplayScreen:
         else:
             self._add_game_text("No saved progress found.")
 
-    def _on_home(self, e: ft.ControlEvent) -> None:
+    def _on_home(self, e: ft.Event[ft.Button]) -> None:
         from zforge.app import navigate
         from zforge.ui.screens.home_screen import HomeScreen
 

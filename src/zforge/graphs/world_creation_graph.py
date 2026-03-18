@@ -17,44 +17,52 @@ docs/World Generation.md.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
 import re
 import shutil
 import uuid as uuid_mod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
-from langchain_core.tools import tool
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 
-from zforge.graphs.graph_utils import extract_text_content, log_node, make_retrieve_graph_tool
+from zforge.graphs.graph_utils import extract_text_content, log_node, make_world_query_tools
 from zforge.graphs.state import CreateWorldState
-from zforge.graphs.document_parsing_graph import _LLAMA_EXECUTOR
 
 log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from zforge.managers.zworld_manager import ZWorldManager
+    from zforge.models.zforge_config import ZForgeConfig
     from zforge.services.embedding.embedding_connector import EmbeddingConnector
     from zforge.services.llm.llm_connector import LlmConnector
 
 # --- World Generation entity schema (from docs/World Generation.md Step 1) ---
 
 ALLOWED_NODES = [
-    "Character", "Location", "Event", "Faction", "Artifact", "Era",
-    "Culture", "Deity", "Prophecy", "Concept", "Mechanic", "Trope",
-    "Species", "Occupation",
+    "Character", "Species", "Organization", "Location", "Region",
+    "Item", "Event", "TimePeriod", "Culture", "BeliefSystem",
+    "Law", "Myth", "Conflict", "Goal",
 ]
 
 ALLOWED_RELATIONSHIPS = [
-    "friends_with", "enemy_of", "parent_of", "mentor_of", "present_at",
-    "born_in", "member_of", "leads", "is_a", "owns", "seeks",
-    "subject_to", "embodies", "west_of", "inside_of", "controls",
-    "native_to", "located_at", "occurred_at", "allied_with",
-    "at_war_with", "caused", "preceded",
+    "is_a", "instance_of", "subtype_of", "lives_in", "located_in",
+    "originates_from", "born_in", "died_at", "contains", "nested_in",
+    "adjacent_to", "native_to", "occurs_within", "born_during",
+    "died_during", "overlaps", "preceded_by", "named_after", "owns",
+    "controls", "rules", "created_by", "knows", "related_to",
+    "descended_from", "allied_with", "enemy_of", "loyal_to", "betrayed",
+    "mentored", "loves", "fears", "member_of", "employed_by", "opposes",
+    "operates_through", "founded_by", "based_in", "participated_in",
+    "witnessed", "caused", "triggered_by", "resulted_in", "occurred_at",
+    "founded", "created", "destroyed", "affected_by", "wants", "targets",
+    "seeks", "believes_in", "follows", "governed_by", "belongs_to",
+    "practices", "practised_in", "knows_about", "hides", "reveals",
+    "misinformed_about", "symbol_of", "part_of", "originated_in",
+    "conflicts_with", "derived_from", "governs", "embodies", "believed_by",
+    "about", "involves", "between",
 ]
 
 # --- Summarizer prompt (authoritative, from docs/World Generation.md Step 2) ---
@@ -63,7 +71,7 @@ _SUMMARIZER_SYSTEM_PROMPT = """\
 You are a junior script editor with access to a hybrid data store describing \
 a fictional world. Look up appropriate details to produce the following \
 information about the world in a JSON document:
-- `title`: the full display name of the world (e.g. "Discworld")
+- `title`: the full display name of the world (e.g. "The Dragonet Prophecy")
 - `summary`: 3–5 sentences describing the world in diegetic terms, suitable \
 for helping a player understand the world at a glance
 - `setting_era`: a brief label for when the world is nominally set (e.g. \
@@ -74,38 +82,39 @@ world is drawn from
 generation (e.g. "moderate violence", "political intrigue", "body horror")
 
 Use the retriever tools to look up information before producing your final \
-answer. When you are ready, respond with ONLY a JSON object (no markdown \
-fencing) with exactly these keys: title, summary, setting_era, source_canon, \
-content_advisories."""
+answer. DO NOT use information from these examples in your final output. \
+ONLY use data retrieved via your tools. When you are ready, respond with \
+ONLY a JSON object (no markdown fencing) with exactly these keys: title, \
+summary, setting_era, source_canon, content_advisories."""
 
 
 # --- Node Factories ---
 
 
 def _make_document_parsing_node(
-    contextualizer_connector,
-    graph_extractor_connector,
-    embedding_connector,
-    config,
+    graph_extractor_connector: LlmConnector,
+    entity_summarizer_connector: LlmConnector,
+    embedding_connector: EmbeddingConnector,
+    config: ZForgeConfig,
     bundles_root: str,
-    contextualizer_model: str | None = None,
     graph_extractor_model: str | None = None,
+    entity_summarizer_model: str | None = None,
 ):
     """Return a node that runs the document parsing sub-graph."""
 
     from zforge.graphs.document_parsing_graph import build_document_parsing_graph
 
     parsing_graph = build_document_parsing_graph(
-        contextualizer_connector=contextualizer_connector,
         graph_extractor_connector=graph_extractor_connector,
+        entity_summarizer_connector=entity_summarizer_connector,
         embedding_connector=embedding_connector,
         config=config,
-        contextualizer_model=contextualizer_model,
         graph_extractor_model=graph_extractor_model,
+        entity_summarizer_model=entity_summarizer_model,
     )
 
     @log_node("document_parsing")
-    async def document_parsing_node(state: CreateWorldState) -> dict:
+    async def document_parsing_node(state: CreateWorldState) -> dict[str, Any]:
         # If resuming after duplicate confirmation, parsing is already done — skip.
         if state.get("z_bundle_root"):
             log.info("document_parsing_node: z_bundle_root already set — skipping")
@@ -127,8 +136,22 @@ def _make_document_parsing_node(
             "status_message": "Starting document parsing...",
         }
 
-        # Run the parsing sub-graph asynchronously
-        result = await parsing_graph.ainvoke(parsing_state)
+        # Stream the parsing sub-graph so every node update is visible in the
+        # console log (rather than blocking silently until ainvoke returns).
+        result = parsing_state.copy()
+        async for event in parsing_graph.astream(
+            parsing_state, stream_mode="updates"
+        ):
+            for node_name, node_output in event.items():
+                if isinstance(node_output, dict):
+                    result = {**result, **node_output}
+                    sub_msg = node_output.get("status_message")
+                    log.info(
+                        "document_parsing_node: [sub] node=%r status=%r message=%r",
+                        node_name,
+                        node_output.get("status"),
+                        sub_msg,
+                    )
 
         log.info(
             "document_parsing_node: sub-graph completed — status=%r",
@@ -146,14 +169,14 @@ def _make_document_parsing_node(
 
 
 def _make_summarizer_node(
-    llm_connector, embedding_connector, model_name: str | None = None
+    llm_connector: LlmConnector, embedding_connector: EmbeddingConnector, model_name: str | None = None
 ):
     """Return an agentic RAG node that queries the Z-Bundle to produce KVP JSON."""
 
-    _model_cache: list = []
+    _model_cache: list[Any] = []
 
     @log_node("summarizer")
-    async def summarizer_node(state: CreateWorldState) -> dict:
+    async def summarizer_node(state: CreateWorldState) -> dict[str, Any]:
         # If resuming after duplicate confirmation, metadata is already set — skip.
         if state.get("zworld_kvp"):
             log.info("summarizer_node: zworld_kvp already set — skipping")
@@ -166,47 +189,28 @@ def _make_summarizer_node(
             _model_cache.append(llm_connector.get_model(model_name))
         model = _model_cache[0]
 
-        z_bundle_root = state["z_bundle_root"]
+        z_bundle_root = state.get("z_bundle_root") or ""
 
         # Build retriever tools for this Z-Bundle
-        @tool
-        async def retrieve_vector(query: str) -> str:
-            """Search the Z-Bundle's vector store for semantically similar chunks.
+        query_world, retrieve_source = make_world_query_tools(
+            z_bundle_root, ALLOWED_NODES, embedding_connector
+        )
 
-            Args:
-                query: Natural language search query.
-            """
-            import lancedb
-
-            vector_path = f"{z_bundle_root}/vector"
-            loop = asyncio.get_running_loop()
-            embedder = embedding_connector.get_embeddings()
-            query_vec = await loop.run_in_executor(
-                _LLAMA_EXECUTOR,
-                lambda: embedder.embed_query(query),
-            )
-            db = await lancedb.connect_async(vector_path)
-            table = await db.open_table("chunks")
-            results_arrow = await (
-                await table.search(query_vec, query_type="vector")
-            ).limit(5).to_arrow()
-            texts = results_arrow.column("text").to_pylist()
-            if not texts:
-                return "No results found."
-            return "\n\n---\n\n".join(t for t in texts if t)
-
-        retrieve_graph = make_retrieve_graph_tool(z_bundle_root)
-
-        tools = [retrieve_vector, retrieve_graph]
-        messages = list(state.get("messages") or [])
+        tools = [query_world, retrieve_source]
+        messages: list[BaseMessage] = list(state.get("messages") or [])
 
         # If this is the first invocation, seed with the system/human messages
         if not messages:
             messages = [
                 SystemMessage(content=_SUMMARIZER_SYSTEM_PROMPT),
                 HumanMessage(
-                    content="Produce the JSON metadata for this world. "
-                    "Use the retriever tools to look up details first."
+                    content=(
+                        "Process the world described in the hybrid data store. "
+                        "First, identify the title and source material. Then, "
+                        "search for a diegetic summary and thematic advisories. "
+                        "Finally, produce the JSON metadata object. Only use "
+                        "information retrieved via tools; do not hallucinate."
+                    )
                 ),
             ]
 
@@ -215,7 +219,7 @@ def _make_summarizer_node(
         messages.append(response)
 
         # Process tool calls inline (per Processes.md — no ToolNode)
-        state_updates: dict = {"messages": messages}
+        state_updates: dict[str, Any] = {"messages": messages}
 
         if hasattr(response, "tool_calls") and response.tool_calls:
             tool_map = {t.name: t for t in tools}
@@ -269,7 +273,7 @@ def _make_summarizer_node(
     return summarizer_node
 
 
-def _parse_summarizer_json(content: str) -> dict | None:
+def _parse_summarizer_json(content: str) -> dict[str, Any] | None:
     """Extract a JSON object from the summarizer's response text."""
     # Try direct parse
     try:
@@ -297,11 +301,11 @@ def _parse_summarizer_json(content: str) -> dict | None:
     return None
 
 
-def _make_duplicate_check_node(zworld_manager):
+def _make_duplicate_check_node(zworld_manager: ZWorldManager | None):
     """Return a node that checks for an existing world with a matching title."""
 
     @log_node("duplicate_check")
-    def duplicate_check_node(state: CreateWorldState) -> dict:
+    def duplicate_check_node(state: CreateWorldState) -> dict[str, Any]:
         # If the user has already made a decision (resuming), act on it.
         overwrite_decision = state.get("overwrite_decision")
         if overwrite_decision == "cancel":
@@ -348,11 +352,11 @@ def _make_duplicate_check_node(zworld_manager):
     return duplicate_check_node
 
 
-def _make_finalizer_node(zworld_manager):
+def _make_finalizer_node(zworld_manager: ZWorldManager | None):
     """Return a deterministic node that constructs ZWorld and writes the Z-Bundle."""
 
     @log_node("finalizer")
-    def finalizer_node(state: CreateWorldState) -> dict:
+    def finalizer_node(state: CreateWorldState) -> dict[str, Any]:
         from zforge.models.zworld import ZWorld
 
         kvp = state.get("zworld_kvp")
@@ -364,8 +368,14 @@ def _make_finalizer_node(zworld_manager):
                 "status_message": "World creation failed: no metadata extracted",
             }
 
-        title = kvp.get("title", "Unknown World")
-        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+        title: str = kvp.get("title", "Unknown World") or "Unknown World"
+        slug: str = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+
+        # Honour locked overrides (used by reindex_world)
+        if state.get("locked_title"):
+            title = state["locked_title"] or title
+        if state.get("locked_slug"):
+            slug = state["locked_slug"] or slug
 
         # Use the UUID that was assigned at the very start of the pipeline.
         world_uuid = state.get("world_uuid") or str(uuid_mod.uuid4())
@@ -383,12 +393,12 @@ def _make_finalizer_node(zworld_manager):
         if zworld_manager is not None:
             # Move the in-progress bundle to its final location.
             old_root = state.get("z_bundle_root", "")
-            new_root = str(zworld_manager._world_root(slug))
+            new_root = str(zworld_manager._world_root(slug))  # pyright: ignore[reportPrivateUsage]
 
             # If overwriting, remove the old world first.
             conflicting_slug = state.get("conflicting_slug")
             if state.get("overwrite_decision") == "overwrite" and conflicting_slug:
-                existing_path = zworld_manager._world_root(conflicting_slug)
+                existing_path = zworld_manager._world_root(conflicting_slug)  # pyright: ignore[reportPrivateUsage]
                 if existing_path.exists():
                     shutil.rmtree(existing_path)
                     log.info(
@@ -446,15 +456,15 @@ def _route_after_duplicate_check(state: CreateWorldState) -> str:
 
 def build_create_world_graph(
     summarizer_connector: LlmConnector,
-    contextualizer_connector: LlmConnector,
     graph_extractor_connector: LlmConnector,
+    entity_summarizer_connector: LlmConnector,
     embedding_connector: EmbeddingConnector,
     zworld_manager: ZWorldManager,
-    config,
+    config: ZForgeConfig,
     bundles_root: str,
     summarizer_model: str | None = None,
-    contextualizer_model: str | None = None,
     graph_extractor_model: str | None = None,
+    entity_summarizer_model: str | None = None,
 ):
     """Build and compile the world creation LangGraph StateGraph.
 
@@ -462,18 +472,17 @@ def build_create_world_graph(
     ----------
     summarizer_connector:
         LLM connector for the Step 2 summarizer (agentic RAG).
-    contextualizer_connector / graph_extractor_connector:
+    graph_extractor_connector / entity_summarizer_connector:
         LLM connectors for the document_parsing sub-graph.
     embedding_connector:
         Embedding connector for vector ingestion and retriever tools.
     zworld_manager:
         ZWorldManager instance for writing the final Z-Bundle.
     config:
-        ZForgeConfig providing parsing_chunk_size, parsing_chunk_overlap,
-        parsing_retrieval_chunk_size, and parsing_retrieval_chunk_overlap.
+        ZForgeConfig providing parsing/chunking/dedup/entity config fields.
     bundles_root:
         Root directory for Z-Bundles (e.g. "bundles/").
-    summarizer_model / contextualizer_model / graph_extractor_model:
+    summarizer_model / graph_extractor_model / entity_summarizer_model:
         Optional model name overrides.
     """
     graph = StateGraph(CreateWorldState)
@@ -481,13 +490,13 @@ def build_create_world_graph(
     graph.add_node(
         "document_parsing",
         _make_document_parsing_node(
-            contextualizer_connector=contextualizer_connector,
             graph_extractor_connector=graph_extractor_connector,
+            entity_summarizer_connector=entity_summarizer_connector,
             embedding_connector=embedding_connector,
             config=config,
             bundles_root=bundles_root,
-            contextualizer_model=contextualizer_model,
             graph_extractor_model=graph_extractor_model,
+            entity_summarizer_model=entity_summarizer_model,
         ),
     )
     graph.add_node(

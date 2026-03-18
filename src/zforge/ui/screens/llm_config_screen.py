@@ -75,6 +75,7 @@ class LlmConfigScreen:
         self._chat_bar_label: ft.Text | None = None
         self._embed_bar_label: ft.Text | None = None
         self._download_status_label: ft.Text | None = None
+        self._embedding_context_size_input: ft.TextField | None = None
         self._chunk_size_input: ft.TextField | None = None
         self._chunk_overlap_pct_input: ft.TextField | None = None
         self._retrieval_chunk_size_input: ft.TextField | None = None
@@ -146,7 +147,7 @@ class LlmConfigScreen:
                 provider_sel = ft.Dropdown(
                     options=[ft.dropdown.Option(p) for p in providers],
                     value=init_provider if init_provider in providers else None,
-                    on_change=lambda e, ps=ps, ns=ns: self._on_provider_change(ps, ns, e),
+                    on_select=lambda e, ps=ps, ns=ns: self._on_provider_change(ps, ns, e),
                     width=180,
                 )
                 model_sel = ft.Dropdown(
@@ -197,7 +198,7 @@ class LlmConfigScreen:
         self._chat_sel = ft.Dropdown(
             options=[ft.dropdown.Option(e.display_name) for e in self._chat_entries],
             value=default_name,
-            on_change=self._update_size_label,
+            on_select=self._update_size_label,
         )
         controls.append(self._chat_sel)
 
@@ -222,6 +223,18 @@ class LlmConfigScreen:
 
         self._download_status_label = ft.Text("")
         controls.append(self._download_status_label)
+
+        config_service = self._state.config_service
+        config = config_service.load() if config_service else None
+        embed_ctx = config.embedding_context_size if config else 8192
+        self._embedding_context_size_input = ft.TextField(value=str(embed_ctx), width=100)
+        controls.append(
+            ft.Row([
+                ft.Text("Embedding context (tokens):", width=220),
+                self._embedding_context_size_input,
+                ft.Text("(nomic-embed-text-v1.5 supports up to 8192)"),
+            ])
+        )
 
         return controls
 
@@ -255,18 +268,18 @@ class LlmConfigScreen:
         ]
 
     def _build_button_row(self) -> list[ft.Control]:
-        return [
-            ft.Row([
-                ft.ElevatedButton("Use Defaults", on_click=self._on_use_defaults),
-                ft.ElevatedButton("Save", on_click=self._on_save),
-            ]),
+        btn_controls: list[ft.Control] = [
+            ft.ElevatedButton("Use Defaults", on_click=self._on_use_defaults),
+            ft.ElevatedButton("Save", on_click=self._on_save),
         ]
+        result: list[ft.Control] = [ft.Row(btn_controls)]
+        return result
 
     # ------------------------------------------------------------------
     # Event handlers
     # ------------------------------------------------------------------
 
-    def _on_provider_change(self, process_slug: str, node_slug: str, e: ft.ControlEvent) -> None:
+    def _on_provider_change(self, process_slug: str, node_slug: str, e: ft.Event[ft.Dropdown]) -> None:
         """Refresh the model list when a node's provider changes."""
         row = self._node_rows.get((process_slug, node_slug))
         if row is None:
@@ -302,7 +315,7 @@ class LlmConfigScreen:
                 return entry
         return self._chat_entries[0]
 
-    def _on_download(self, e: ft.ControlEvent) -> None:
+    def _on_download(self, e: ft.Event[ft.Button]) -> None:
         self._page.run_task(self._run_downloads)
 
     async def _run_downloads(self) -> None:
@@ -380,12 +393,12 @@ class LlmConfigScreen:
                 self._download_btn.disabled = False
             self._page.update()
 
-    def _on_use_defaults(self, e: ft.ControlEvent) -> None:
+    def _on_use_defaults(self, e: ft.Event[ft.Button]) -> None:
         """Proceed without saving any changes."""
         if self._on_done:
             self._on_done()
 
-    def _on_save(self, e: ft.ControlEvent) -> None:
+    def _on_save(self, e: ft.Event[ft.Button]) -> None:
         """Persist node config + API keys then proceed."""
         config_service = self._state.config_service
         registry = self._state.connector_registry
@@ -415,6 +428,13 @@ class LlmConfigScreen:
                     config.parsing_retrieval_chunk_size = retrieval_size
                     config.parsing_retrieval_chunk_overlap = round(
                         retrieval_size * retrieval_overlap_pct / 100
+                    )
+                except ValueError:
+                    pass
+            if self._embedding_context_size_input:
+                try:
+                    config.embedding_context_size = max(
+                        1, int(self._embedding_context_size_input.value or "8192")
                     )
                 except ValueError:
                     pass

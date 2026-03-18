@@ -35,7 +35,7 @@ class EmbeddingConnector(ABC):
         """
 
     @abstractmethod
-    def model_identity(self) -> dict:
+    def model_identity(self) -> dict[str, str | int]:
         """Return embedding model metadata for Z-Bundle KVP storage.
 
         Returns a dict with keys:

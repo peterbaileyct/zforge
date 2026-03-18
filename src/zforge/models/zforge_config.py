@@ -72,7 +72,7 @@ class ZForgeConfig:
     chat_context_size: int = 8192
     chat_gpu_layers: int = 0
     embedding_model_path: str = ""
-    embedding_context_size: int = 512
+    embedding_context_size: int = 8192
     embedding_gpu_layers: int = 0
     preferences: PlayerPreferences = field(default_factory=PlayerPreferences)
     llm_nodes: dict[str, dict[str, LlmNodeConfig]] = field(
@@ -82,6 +82,13 @@ class ZForgeConfig:
     parsing_chunk_overlap: int = 500
     parsing_retrieval_chunk_size: int = 500
     parsing_retrieval_chunk_overlap: int = 50
+    coref_resolution_enabled: bool = True
+    coref_max_chars: int = 60000
+    entity_dedup_enabled: bool = True
+    entity_dedup_threshold: float = 0.93
+    entity_summarization_enabled: bool = True
+    entity_summarization_max_passages: int = 20
+    entity_summarization_max_chars: int = 40000
 
     def to_dict(self) -> dict[str, Any]:
         llm_nodes_dict: dict[str, Any] = {}
@@ -106,6 +113,13 @@ class ZForgeConfig:
             "parsing_chunk_overlap": self.parsing_chunk_overlap,
             "parsing_retrieval_chunk_size": self.parsing_retrieval_chunk_size,
             "parsing_retrieval_chunk_overlap": self.parsing_retrieval_chunk_overlap,
+            "coref_resolution_enabled": self.coref_resolution_enabled,
+            "coref_max_chars": self.coref_max_chars,
+            "entity_dedup_enabled": self.entity_dedup_enabled,
+            "entity_dedup_threshold": self.entity_dedup_threshold,
+            "entity_summarization_enabled": self.entity_summarization_enabled,
+            "entity_summarization_max_passages": self.entity_summarization_max_passages,
+            "entity_summarization_max_chars": self.entity_summarization_max_chars,
         }
 
     @classmethod
@@ -126,7 +140,7 @@ class ZForgeConfig:
             chat_context_size=data.get("chat_context_size", 8192),
             chat_gpu_layers=data.get("chat_gpu_layers", 0),
             embedding_model_path=data.get("embedding_model_path", ""),
-            embedding_context_size=data.get("embedding_context_size", 512),
+            embedding_context_size=data.get("embedding_context_size", 8192),
             embedding_gpu_layers=data.get("embedding_gpu_layers", 0),
             preferences=PlayerPreferences.from_dict(prefs_data),
             llm_nodes=llm_nodes,
@@ -134,4 +148,11 @@ class ZForgeConfig:
             parsing_chunk_overlap=data.get("parsing_chunk_overlap", 500),
             parsing_retrieval_chunk_size=data.get("parsing_retrieval_chunk_size", 500),
             parsing_retrieval_chunk_overlap=data.get("parsing_retrieval_chunk_overlap", 50),
+            coref_resolution_enabled=data.get("coref_resolution_enabled", True),
+            coref_max_chars=data.get("coref_max_chars", 60000),
+            entity_dedup_enabled=data.get("entity_dedup_enabled", True),
+            entity_dedup_threshold=data.get("entity_dedup_threshold", 0.93),
+            entity_summarization_enabled=data.get("entity_summarization_enabled", True),
+            entity_summarization_max_passages=data.get("entity_summarization_max_passages", 20),
+            entity_summarization_max_chars=data.get("entity_summarization_max_chars", 40000),
         )

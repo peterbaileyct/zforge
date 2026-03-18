@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import quickjs
 
@@ -27,7 +28,15 @@ class InkEngineConnector(IfEngineConnector):
     """IF engine connector for ink via quickjs + inkjs."""
 
     def __init__(self) -> None:
-        self._ctx: quickjs.Context | None = None
+        self._ctx: Any = None
+
+    def _ensure_ctx(self) -> Any:
+        """Return the quickjs Context, raising if not initialized."""
+        if self._ctx is None:
+            raise RuntimeError(
+                "InkEngineConnector.initialize() must be called first"
+            )
+        return self._ctx
 
     async def initialize(self) -> None:
         """Must be called before any other method."""
@@ -110,7 +119,7 @@ Common patterns:
     async def build(self, script: str) -> BuildResult:
         self._ensure_initialized()
         escaped = json.dumps(script)
-        result = self._ctx.eval(f"""
+        result = self._ensure_ctx().eval(f"""
             (function() {{
                 try {{
                     var compiler = new inkjs.Compiler({escaped});
@@ -147,14 +156,14 @@ Common patterns:
         json_str = compiled_data.decode("utf-8")
         # inkjs.Story expects a parsed JSON object. Ensure we pass a JS object
         # by calling JSON.parse(...) on the compiled JSON string.
-        self._ctx.eval(
+        self._ensure_ctx().eval(
             f"globalThis._inkStory = new inkjs.Story(JSON.parse({json.dumps(json_str)}));"
         )
         # Fault-tolerance: if the story starts in a terminal state (no content
         # and no choices), or if it canContinue but produces no text (a "ghost" start),
         # the generated script likely has a missing or broken root divert.
         # Attempt recovery by seeking the first named knot.
-        recovery = self._ctx.eval(f"""
+        recovery = self._ensure_ctx().eval(f"""
             (function() {{
                 var story = globalThis._inkStory;
                 var inkJson = JSON.parse({json.dumps(json_str)});
@@ -218,7 +227,7 @@ Common patterns:
             print("InkEngineConnector.start_experience: recovery attempt ->", recovery)
         # Diagnostic: inspect initial story state and currentChoices to aid debugging.
         try:
-            diag = self._ctx.eval(
+            diag = self._ensure_ctx().eval(
                 "JSON.stringify({canContinue: globalThis._inkStory.canContinue, choices: globalThis._inkStory.currentChoices.map(function(c){return c.text;})})"
             )
             print("InkEngineConnector.start_experience: story diag ->", diag)
@@ -229,7 +238,7 @@ Common patterns:
         return text
 
     def _continue_story(self) -> str:
-        result = self._ctx.eval("""
+        result = self._ensure_ctx().eval("""
             (function() {
                 var story = globalThis._inkStory;
                 var text = "";
@@ -247,11 +256,11 @@ Common patterns:
     async def take_action(self, input: str) -> ActionResult:
         self._ensure_initialized()
         choice_index = int(input)
-        self._ctx.eval(
+        self._ensure_ctx().eval(
             f"globalThis._inkStory.ChooseChoiceIndex({choice_index});"
         )
         text = self._continue_story()
-        state = json.loads(self._ctx.eval("""
+        state = json.loads(self._ensure_ctx().eval("""
             JSON.stringify({
                 choices: globalThis._inkStory.currentChoices.map(function(c){return c.text;}),
                 isComplete: !globalThis._inkStory.canContinue && globalThis._inkStory.currentChoices.length === 0
@@ -264,7 +273,7 @@ Common patterns:
 
     async def save_state(self) -> bytes:
         self._ensure_initialized()
-        result = self._ctx.eval(
+        result = self._ensure_ctx().eval(
             "JSON.stringify(globalThis._inkStory.state.ToJson())"
         )
         return result.encode("utf-8")
@@ -273,11 +282,11 @@ Common patterns:
         """Restore state and return ActionResult (per ABC spec)."""
         self._ensure_initialized()
         state_json = saved_state.decode("utf-8")
-        self._ctx.eval(
+        self._ensure_ctx().eval(
             f"globalThis._inkStory.state.LoadJson({json.dumps(state_json)});"
         )
         text = self._continue_story()
-        state = json.loads(self._ctx.eval("""
+        state = json.loads(self._ensure_ctx().eval("""
             JSON.stringify({
                 choices: globalThis._inkStory.currentChoices.map(function(c){return c.text;}),
                 isComplete: !globalThis._inkStory.canContinue && globalThis._inkStory.currentChoices.length === 0
@@ -293,21 +302,21 @@ Common patterns:
     async def get_current_choices(self) -> list[str]:
         """Get current available choices without making a selection."""
         self._ensure_initialized()
-        return json.loads(self._ctx.eval(
+        return json.loads(self._ensure_ctx().eval(
             "JSON.stringify(globalThis._inkStory.currentChoices.map(function(c){return c.text;}))"
         ))
 
-    async def get_variable(self, name: str):
+    async def get_variable(self, name: str) -> Any:
         """Get current value of a story variable."""
         self._ensure_initialized()
-        return json.loads(self._ctx.eval(
+        return json.loads(self._ensure_ctx().eval(
             f"JSON.stringify(globalThis._inkStory.variablesState[{json.dumps(name)}])"
         ))
 
-    async def set_variable(self, name: str, value) -> None:
+    async def set_variable(self, name: str, value: Any) -> None:
         """Set a story variable."""
         self._ensure_initialized()
-        self._ctx.eval(
+        self._ensure_ctx().eval(
             f"globalThis._inkStory.variablesState[{json.dumps(name)}] = {json.dumps(value)};"
         )
 

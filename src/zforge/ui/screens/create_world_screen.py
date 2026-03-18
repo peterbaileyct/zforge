@@ -8,7 +8,7 @@ docs/User Experience.md and docs/World Generation.md.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import flet as ft
 
@@ -38,25 +38,40 @@ class CreateWorldScreen:
             hint_text="Describe characters, locations, relationships, and events...",
         )
 
+        self._rationale_output = ft.TextField(
+            label="Rationale / Action Log",
+            multiline=True,
+            read_only=True,
+            text_size=12,
+            min_lines=3,
+            max_lines=10,
+            visible=False,
+        )
+
         self._create_btn = ft.ElevatedButton(
             "Create World",
             on_click=self._on_create,
         )
 
+        row_controls: list[ft.Control] = [
+            self._create_btn,
+            ft.ElevatedButton("Back", on_click=self._on_back),
+        ]
+        col_controls: list[ft.Control] = [
+            ft.Text("Create World", size=16, weight=ft.FontWeight.BOLD),
+            ft.Text("Enter a description of your fictional world below:"),
+            self._text_input,
+            self._rationale_output,
+            ft.Row(row_controls, spacing=10),
+            self._progress_label,
+        ]
         return ft.Column(
-            [
-                ft.Text("Create World", size=16, weight=ft.FontWeight.BOLD),
-                ft.Text("Enter a description of your fictional world below:"),
-                self._text_input,
-                self._create_btn,
-                ft.ElevatedButton("Back", on_click=self._on_back),
-                self._progress_label,
-            ],
+            col_controls,
             spacing=10,
             expand=True,
         )
 
-    def _on_create(self, e: ft.ControlEvent) -> None:
+    def _on_create(self, e: ft.Event[ft.Button]) -> None:
         description = self._text_input.value.strip()
         if not description:
             self._progress_label.value = "Please enter a world description."
@@ -76,13 +91,13 @@ class CreateWorldScreen:
         result_event = asyncio.Event()
         result_holder: list[str] = ["cancel"]
 
-        def _on_overwrite(e: ft.ControlEvent) -> None:
+        def _on_overwrite(e: ft.Event[ft.TextButton]) -> None:
             result_holder[0] = "overwrite"
             dlg.open = False
             self._page.update()
             result_event.set()
 
-        def _on_cancel(e: ft.ControlEvent) -> None:
+        def _on_cancel(e: ft.Event[ft.TextButton]) -> None:
             result_holder[0] = "cancel"
             dlg.open = False
             self._page.update()
@@ -94,10 +109,10 @@ class CreateWorldScreen:
                 f"A world with slug '{conflicting_slug}' already exists.\n\n"
                 "Would you like to overwrite it?"
             ),
-            actions=[
+            actions=list[ft.Control]([
                 ft.TextButton("Overwrite", on_click=_on_overwrite),
                 ft.TextButton("Cancel", on_click=_on_cancel),
-            ],
+            ]),
             open=True,
         )
         self._page.overlay.append(dlg)
@@ -119,10 +134,22 @@ class CreateWorldScreen:
             self._progress_label.value = msg
             self._page.update()
 
+        def on_rationale(rationale: str, entry: dict[str, Any]) -> None:
+            # Show and update rationale console
+            if not self._rationale_output.visible:
+                self._rationale_output.visible = True
+            
+            current_text = self._rationale_output.value or ""
+            if current_text:
+                current_text += "\n"
+            self._rationale_output.value = current_text + rationale
+            self._page.update()
+
         try:
             zworld = await mgr.start_world_creation(
                 input_text=description,
                 on_progress=on_update,
+                on_rationale=on_rationale,
                 on_confirm_duplicate=self._confirm_duplicate,
             )
 
@@ -140,6 +167,6 @@ class CreateWorldScreen:
             self._create_btn.disabled = False
             self._page.update()
 
-    def _on_back(self, e: ft.ControlEvent) -> None:
+    def _on_back(self, e: ft.Event[ft.Button]) -> None:
         if self._on_done:
             self._on_done()

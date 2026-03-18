@@ -15,13 +15,15 @@ flowchart TD
     end
 
     subgraph Repositories
-        R_vector[(LanceDB · chunks)]
+        R_entities[(LanceDB · entities)]
+        R_chunks[(LanceDB · chunks)]
         R_graph[(KuzuDB · property graph)]
     end
 
     subgraph Tools
-        T_vec_retriever[retrieve_vector] --> R_vector
-        T_graph_retriever[retrieve_graph] --> R_graph
+        T_query_world[query_world] --> R_entities
+        T_query_world --> R_graph
+        T_retrieve_source[retrieve_source] --> R_chunks
     end
 
     subgraph Process
@@ -35,8 +37,8 @@ flowchart TD
     P_librarian <-.-> S_zworld_kvp
     P_librarian <-.-> S_user_question
     P_librarian <-.-> S_answer
-    T_vec_retriever <-.-> P_librarian
-    T_graph_retriever <-.-> P_librarian
+    T_query_world <-.-> P_librarian
+    T_retrieve_source <-.-> P_librarian
 ```
 
 ## Input
@@ -70,20 +72,18 @@ The world context and user question are combined into a single `HumanMessage`:
 - **Default provider:** Google
 - **Default model:** `gemini-2.5-flash`
 - **Graph file:** `src/zforge/graphs/ask_about_world_graph.py`
-- The Librarian agent follows the [LangGraph tool call pattern](Processes.md#langgraph-tool-call-pattern): it calls `model.bind_tools([retrieve_vector, retrieve_graph]).invoke(messages)` directly and loops until the model emits no further tool calls, then writes `answer` from the final message content.
+- The Librarian agent follows the [LangGraph tool call pattern](Processes.md#langgraph-tool-call-pattern): it calls `model.bind_tools([query_world, retrieve_source]).invoke(messages)` directly and loops until the model emits no further tool calls, then writes `answer` from the final message content.
 - The system prompt is a single `SystemMessage` containing only the behavioural instruction. The world context JSON is placed in the `HumanMessage`, prepended to the question. See pitfall below regarding JSON in the system prompt on Groq/Llama models.
-- **`retrieve_vector`** performs a semantic similarity search over the LanceDB `chunks` table (local embedding via llama.cpp).
-- **`retrieve_graph`** is produced by `graph_utils.make_retrieve_graph_tool(z_bundle_root)` and has two branches:
-  - **Cypher branch** — if the query starts with `MATCH`, `WITH`, `CALL`, `OPTIONAL`, or `UNWIND`, it is executed directly via `KuzuGraph.query()`. On error or empty results the schema is appended.
-  - **Keyword branch** — otherwise the query is matched case-insensitively against the `id` property of every standard entity node table (`Character`, `Location`, `Faction`, `Event`, `Occupation`, `Species`, `Concept`, `Artifact`, `Prophecy`, `Era`, `Culture`, `Deity`, `Trope`, `Mechanic`). For every hit, one hop of outgoing and incoming relationships is expanded (Chunk nodes excluded), returning relationship type, neighbour type, and neighbour id. The schema is only returned when no entities are found.
-- The same shared `make_retrieve_graph_tool` factory is used by the Summarizer node in [World Generation](World%20Generation.md).
+- **`query_world`** is the primary retrieval tool. Returns matched entity summaries, their 1-hop graph relationships (with populated property values), and optionally adjacent node summaries — all in a single call (see [Unified Entity Query](RAG%20and%20GRAG%20Implementation.md#unified-entity-query-query_world--primary-tool)). The Librarian **should** supply `entity_type` when the question targets a specific type; `include_neighbors=True` for network/relationship questions.
+- **`retrieve_source`** searches the LanceDB `chunks` table for raw verbatim source passages. Use when exact wording is required — contradictions, rumours, specific quotes (see [Verbatim Source Retrieval](RAG%20and%20GRAG%20Implementation.md#verbatim-source-retrieval-retrieve_source)).
+- Both tools are produced by `graph_utils.make_world_query_tools(z_bundle_root, allowed_node_labels, embedding_connector)`, passing the Z-World's `allowed_nodes` list. The same factory is used by the Summarizer node in [World Generation](World%20Generation.md) and by world-querying agents in [Experience Generation](Experience%20Generation.md).
 - The process is registered in `src/zforge/models/process_config.py` under `ask_about_world` / `librarian`.
 - The UI entry point is `WorldDetailsScreen` ([src/zforge/ui/screens/world_details_screen.py](../src/zforge/ui/screens/world_details_screen.py)), which calls `ZWorldManager.ask(slug, question)` and writes the returned string to the answer area.
 
 ### Pitfall: World JSON in the system prompt causes malformed tool calls on Groq/Llama models
 Embedding variable JSON content (such as `zworld_kvp`) in the system prompt for `llama-3.3-70b-versatile` (and related Llama models) via Groq causes the model to generate tool calls in a broken format:
 ```
-<function=retrieve_vector{"query": "…"}</function>
+<function=query_world{"query": "…"}</function>
 ```
 Note the missing `>` delimiter. Groq rejects this with HTTP 400 `tool_use_failed`. The underlying cause is that Groq's server-side Llama chat template embeds tool definitions using `<function=name>` delimiters; any `<` or `>` characters present in the system turn (common in world text containing arrows, comparisons, or HTML) corrupt the template tokenisation.
 

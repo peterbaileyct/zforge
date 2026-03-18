@@ -26,8 +26,14 @@ Player preferences are currently set via numeric sliders (1-10 scales). This may
 | **MEDIUM** | Slider-only preferences may miss nuance | Implement "Ultima-style questions" for preference onboarding | TODO |
 | **MEDIUM** | No experience preview before playing | Add "Read Synopsis" option generated from Outline artifact | Not started |
 | **MEDIUM** | Multiple experience management unclear | Clarify UI for browsing/managing multiple experiences per world | Not started |
+| **MEDIUM** | World generation cannot run on mobile | Hide "Generate World" on iOS/Android (JVM and heavy LLM stack not available on-device); note that a server-side world generation path may be added later | Not started |
+| **MEDIUM** | No way to share Z-Worlds across devices | Define `.zworld` archive format (zip of the Z-Bundle directory tree) and implement export/import so desktop-generated worlds can be transferred to mobile for experience creation | Not started |
 | **LOW** | Web storage unspecified | Decide on IndexedDB vs cloud storage for web platform | TODO |
 | **LOW** | No undo/rewind during gameplay | Consider adding common IF rewind feature | Not started |
+| **LOW** | `RecursiveCharacterTextSplitter` for retrieval pass produces fixed-size, topic-agnostic chunks | Replace with `SemanticChunker` (topic-shift-aware, no LLM cost) per [Parsing § Chunking Strategy](docs/Parsing%20Documents%20to%20Z-Bundles.md#chunking-strategy) | TODO |
+| **LOW** | Propositional chunking not implemented | Implement propositional chunking as an optional retrieval-pass mode for high-value worlds; delivers highest per-fact retrieval precision (see [Parsing § Future: Propositional Chunking](docs/Parsing%20Documents%20to%20Z-Bundles.md#future-propositional-chunking)) | Not started |
+| **LOW** | No static type checking for UI breakage | Implement static type checking (Mypy / Pyright) to catch third-party library API/enum changes at compile time | Not started |
+
 
 ## Existing TODOs (from spec documents)
 
@@ -48,6 +54,19 @@ Player preferences are currently set via numeric sliders (1-10 scales). This may
 
 ### IF Engine Abstraction Layer.md
 - [ ] Future interface enhancements (unspecified)
+
+### Mobile Platform
+- [ ] Guard "Generate World" behind a desktop-only platform check (iOS/Android show a disabled state or hide the option entirely); leave an extension point for a future server-side world generation path on mobile
+- [ ] Define `.zworld` archive format — zip of the Z-Bundle directory tree (`source.txt`, `chunks/` LanceDB table, `propertygraph` KuzuDB file, KVP store) with a top-level manifest (`manifest.json`) recording the bundle slug, UUID, title, and the Z-Forge version that produced it
+- [ ] Implement "Export World" action on desktop (writes `.zworld` to a user-chosen path)
+- [ ] Implement "Import World" action on all platforms (extracts `.zworld` into the platform's `bundles/` directory, validating the manifest)
+
+### Parsing Documents to Z-Bundles.md
+- [ ] Replace `RecursiveCharacterTextSplitter` retrieval pass with `SemanticChunker` (topic-shift-aware splitting; no LLM cost; see [Chunking Strategy](docs/Parsing%20Documents%20to%20Z-Bundles.md#chunking-strategy))
+- [ ] Implement structure-aware context-pass splitting (`MarkdownTextSplitter` + header detection before size-cap fallback)
+- [ ] Add `parent_chunk_id` metadata field to retrieval chunks (parent-child tagging)
+- [ ] Propositional chunking as an opt-in retrieval-pass mode for high-value worlds
+- [ ] PROPN-density pre-filter: skip graph extraction on chunks with fewer than N proper nouns per 100 tokens (spaCy POS tagger; language-agnostic entity-type-independent cost saving; implement only after co-reference and dedup are stable)
 
 ### Testing
 - [ ] Unit tests for core services (ZWorldManager, ExperienceManager, config services)
@@ -78,7 +97,15 @@ Player preferences are currently set via numeric sliders (1-10 scales). This may
 - Ultima-style preference questions
 - Improved preference explanations
 
+### v1.3 - Mobile & Sharing
+- Hide / disable "Generate World" on iOS and Android
+- `.zworld` archive format (zip of Z-Bundle tree + `manifest.json`)
+- Export World action (desktop)
+- Import World action (all platforms, including mobile)
+
 ### v2.0 - Platform Expansion
 - Web storage implementation
 - Parallel processing support
 - Additional IF engines
+- Server-side world generation path for mobile (optional, replaces on-device restriction)
+- Propositional chunking mode for high-value world sources (maximum retrieval precision)

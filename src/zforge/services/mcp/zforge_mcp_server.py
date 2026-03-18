@@ -38,11 +38,11 @@ class ZForgeMcpServer:
 
     def _setup_tools(self) -> None:
         @self._server.list_tools()
-        async def list_tools() -> list[Tool]:
+        async def list_tools() -> list[Tool]:  # type: ignore[reportUnusedFunction]
             return []
 
         @self._server.call_tool()
-        async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+        async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:  # type: ignore[reportUnusedFunction]
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
     @property

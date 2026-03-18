@@ -48,3 +48,11 @@ class LlmConnector(ABC):
     @abstractmethod
     def get_context_size(self) -> int:
         """Return the configured context window size in tokens."""
+
+    @abstractmethod
+    def set_api_key(self, api_key: str) -> None:
+        """Store an API key for this connector.
+
+        For connectors that do not require an API key (e.g. local models),
+        this should be a no-op.
+        """

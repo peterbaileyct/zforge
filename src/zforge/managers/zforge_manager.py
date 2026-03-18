@@ -59,10 +59,10 @@ class ZForgeManager:
 
     async def run_process(
         self,
-        graph,
+        graph: Any,
         initial_state: dict[str, Any],
         on_status_update: Callable[[str], None] | None = None,
-        on_rationale_update: Callable[[str, dict], None] | None = None,
+        on_rationale_update: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """Run a LangGraph graph, streaming status_message and rationale updates to the UI."""
         log.info("run_process: starting — initial status=%r", initial_state.get("status"))
@@ -98,6 +98,10 @@ class ZForgeManager:
                         if on_rationale_update and "action_log" in node_output:
                             for entry in node_output["action_log"]:
                                 on_rationale_update(entry.get("rationale", ""), entry)
+                        elif on_rationale_update and msg:
+                            # Fallback: if no structured action_log, treat status_message
+                            # as a rationale entry so it appears in the console.
+                            on_rationale_update(msg, {"rationale": msg, "node": node_name})
         except Exception as exc:  # surface unexpected errors to caller/UI
             log.exception("run_process: unhandled exception — %s", exc)
             msg = f"Process failed: {exc}"
@@ -151,6 +155,7 @@ class ZForgeManager:
         self,
         input_text: str,
         on_progress: Callable[[str], None] | None = None,
+        on_rationale: Callable[[str, dict[str, Any]], None] | None = None,
         on_confirm_duplicate: Callable[
             [str], Awaitable[str]
         ] | None = None,
@@ -163,19 +168,22 @@ class ZForgeManager:
             The raw world-bible text supplied by the user.
         on_progress:
             Optional callback for streaming status messages to the UI.
+        on_rationale:
+            Optional callback for streaming detailed rationale entries.
         on_confirm_duplicate:
             Optional async callback invoked when a world with the same title
             already exists.  Receives the ``conflicting_slug`` and must return
             ``"overwrite"`` or ``"cancel"``.
         """
         if self._world_creation_graph is None:
+            # ... existing building logic ...
             log.info("start_world_creation: building graph (first call)")
             # Resolve connectors for document_parsing sub-graph
-            ctx_connector, ctx_model = self._resolve_node_connector(
-                "document_parsing", "contextualizer"
-            )
             gext_connector, gext_model = self._resolve_node_connector(
                 "document_parsing", "graph_extractor"
+            )
+            esum_connector, esum_model = self._resolve_node_connector(
+                "document_parsing", "entity_summarizer"
             )
             # Resolve connector for world_generation summarizer
             sum_connector, sum_model = self._resolve_node_connector(
@@ -183,15 +191,15 @@ class ZForgeManager:
             )
             self._world_creation_graph = build_create_world_graph(
                 summarizer_connector=sum_connector,
-                contextualizer_connector=ctx_connector,
                 graph_extractor_connector=gext_connector,
+                entity_summarizer_connector=esum_connector,
                 embedding_connector=self._embedding_connector,
                 zworld_manager=self.zworld_manager,
                 config=self._config,
                 bundles_root=self._config.bundles_root,
                 summarizer_model=sum_model,
-                contextualizer_model=ctx_model,
                 graph_extractor_model=gext_model,
+                entity_summarizer_model=esum_model,
             )
         graph = self._world_creation_graph
         initial_state = {
@@ -201,12 +209,14 @@ class ZForgeManager:
             "zworld_kvp": None,
             "conflicting_slug": None,
             "overwrite_decision": None,
+            "locked_slug": None,
+            "locked_title": None,
             "status": "parsing",
             "status_message": "Starting world creation...",
             "failure_reason": None,
             "messages": [],
         }
-        result = await self.run_process(graph, initial_state, on_progress)
+        result = await self.run_process(graph, initial_state, on_progress, on_rationale)
 
         if result.get("status") == "awaiting_confirmation":
             if on_confirm_duplicate is None:
@@ -234,7 +244,7 @@ class ZForgeManager:
                 "status": "resuming",
                 "status_message": f"Resuming world creation with decision: {decision}",
             }
-            result = await self.run_process(graph, resume_state, on_progress)
+            result = await self.run_process(graph, resume_state, on_progress, on_rationale)
 
         if result.get("status") == "complete":
             kvp = result.get("zworld_kvp")
@@ -242,11 +252,108 @@ class ZForgeManager:
                 return ZWorld(**kvp) if isinstance(kvp, dict) else kvp
         return None
 
+    async def reindex_world(
+        self,
+        slug: str,
+        on_progress: Callable[[str], None] | None = None,
+        on_rationale: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> ZWorld | None:
+        """Re-run the document parsing pipeline on an existing world's raw.txt.
+
+        Reads the existing raw.txt and kvp.json, then invokes the world
+        creation graph with locked_slug/locked_title so the finaliser
+        overwrites the existing Z-Bundle in place.
+
+        Parameters
+        ----------
+        slug:
+            Z-World slug identifying the existing world.
+        on_progress:
+            Optional callback for streaming status messages to the UI.
+        on_rationale:
+            Optional callback for streaming detailed rationale entries.
+
+        Returns
+        -------
+        ZWorld | None
+            The refreshed ZWorld on success, or None on failure.
+
+        Raises
+        ------
+        ValueError
+            If raw.txt or kvp.json is missing for the given slug.
+        """
+        log.info("reindex_world: starting for slug=%r", slug)
+        source_text = self.zworld_manager.read_source(slug)
+        if source_text is None:
+            raise ValueError(
+                f"Cannot reindex world '{slug}': raw.txt not found in bundle"
+            )
+
+        existing = self.zworld_manager.read(slug)
+        if existing is None:
+            raise ValueError(
+                f"Cannot reindex world '{slug}': kvp.json not found in bundle"
+            )
+
+        # Ensure the world creation graph is built (reuse lazy-init pattern)
+        if self._world_creation_graph is None:
+            gext_connector, gext_model = self._resolve_node_connector(
+                "document_parsing", "graph_extractor"
+            )
+            esum_connector, esum_model = self._resolve_node_connector(
+                "document_parsing", "entity_summarizer"
+            )
+            sum_connector, sum_model = self._resolve_node_connector(
+                "world_generation", "summarizer"
+            )
+            self._world_creation_graph = build_create_world_graph(
+                summarizer_connector=sum_connector,
+                graph_extractor_connector=gext_connector,
+                entity_summarizer_connector=esum_connector,
+                embedding_connector=self._embedding_connector,
+                zworld_manager=self.zworld_manager,
+                config=self._config,
+                bundles_root=self._config.bundles_root,
+                summarizer_model=sum_model,
+                graph_extractor_model=gext_model,
+                entity_summarizer_model=esum_model,
+            )
+
+        existing_kvp = dataclasses.asdict(existing)
+        initial_state = {
+            "input_text": source_text,
+            "world_uuid": None,
+            "z_bundle_root": None,
+            "zworld_kvp": None,
+            "conflicting_slug": slug,
+            "overwrite_decision": "overwrite",
+            "locked_slug": slug,
+            "locked_title": existing_kvp.get("title", slug),
+            "status": "parsing",
+            "status_message": f"Reindexing world '{slug}'...",
+            "failure_reason": None,
+            "messages": [],
+        }
+
+        result = await self.run_process(
+            self._world_creation_graph, initial_state, on_progress, on_rationale
+        )
+
+        if result.get("status") == "complete":
+            # The world_creation_graph (via finalizer_node) handles the file write
+            # to kvp.json. We use the manager's read() instead of trying to
+            # instantiate ZWorld from the state's dictionary, ensuring the
+            # return value reflects the on-disk state.
+            return self.zworld_manager.read(slug)
+        return None
+
     async def start_experience_generation(
         self,
         world_slug: str,
         player_prompt: str | None = None,
         on_progress: Callable[[str], None] | None = None,
+        on_rationale: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> Experience | None:
         """Run the experience generation process.
 
@@ -258,6 +365,8 @@ class ZForgeManager:
             Optional player prompt / scenario seed.
         on_progress:
             Optional callback for streaming status messages to the UI.
+        on_rationale:
+            Optional callback for streaming detailed rationale entries.
 
         Returns
         -------
@@ -268,8 +377,11 @@ class ZForgeManager:
         # Load world data
         zworld = self.zworld_manager.read(world_slug)
         log.info("start_experience_generation: read zworld=%r", zworld)
-        zworld_kvp = zworld.model_dump() if hasattr(zworld, "model_dump") else dataclasses.asdict(zworld)
-        z_bundle_root = str(self.zworld_manager._world_root(world_slug))
+        if zworld is None:
+            log.warning("start_experience_generation: world '%s' not found", world_slug)
+            return None
+        zworld_kvp = dataclasses.asdict(zworld)
+        z_bundle_root = str(self.zworld_manager._world_root(world_slug))  # type: ignore[reportPrivateUsage]
         log.info("start_experience_generation: z_bundle_root=%r", z_bundle_root)
 
         # Build graph (cached)
@@ -281,7 +393,7 @@ class ZForgeManager:
                 "ink_scripter", "ink_debugger",
                 "ink_qa", "ink_auditor",
             ]
-            connectors: dict[str, tuple] = {}
+            connectors: dict[str, tuple[LlmConnector, str | None]] = {}
             for ns in node_slugs:
                 conn, model = self._resolve_node_connector("experience_generation", ns)
                 connectors[ns] = (conn, model)
@@ -340,6 +452,7 @@ class ZForgeManager:
             graph=self._experience_generation_graph,
             initial_state=initial_state,
             on_status_update=on_progress,
+            on_rationale_update=on_rationale,
         )
         log.info("start_experience_generation: run_process returned status=%r", result.get("status"))
 
@@ -380,9 +493,13 @@ class ZForgeManager:
         str
             Plain-text answer string.
         """
+        from zforge.graphs.world_creation_graph import ALLOWED_NODES
+
         lib_connector, lib_model = self._resolve_node_connector(
             "ask_about_world", "librarian"
         )
         return await self.zworld_manager.ask(
-            slug, question, lib_connector, model_name=lib_model
+            slug, question, lib_connector,
+            allowed_node_labels=ALLOWED_NODES,
+            model_name=lib_model,
         )

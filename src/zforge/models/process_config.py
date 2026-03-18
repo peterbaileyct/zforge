@@ -38,14 +38,14 @@ PROCESSES: list[ProcessSpec] = [
         display="Document Parsing",
         nodes=(
             NodeSpec(
-                slug="contextualizer",
-                display="Contextualizer",
-                default_provider="Groq",
-                default_model="llama-3.3-70b-versatile",
-            ),
-            NodeSpec(
                 slug="graph_extractor",
                 display="Graph Extractor",
+                default_provider="Google",
+                default_model="gemini-2.5-flash-lite",
+            ),
+            NodeSpec(
+                slug="entity_summarizer",
+                display="Entity Summarizer",
                 default_provider="Google",
                 default_model="gemini-2.5-flash-lite",
             ),

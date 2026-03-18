@@ -4,6 +4,14 @@
 The user interface for ZForge is built with [Flet](https://flet.dev/) (Flutter-backed Python UI framework). On PC and Mac, a main application menu takes the user to basic functions like opening an experience or creating a world. On mobile/web, the same menu is accessible by a "hamburger" menu icon to the left of the main text input at the bottom of the main window.
 
 ### Implementation
+Always use Python type hints for all Flet event handlers.
+
+Prefer Flet 1.0 declarative components and hooks over imperative page mutations.
+
+Use page.run_task() for bridging synchronous events to asynchronous backend logic.
+
+Enforce strict typing; do not use Any for Flet controls.
+
 Flet is declared as a dependency in `pyproject.toml` as `flet>=0.24`. The application is launched via `ft.app(target=main)` where `main` is an async function taking `page: ft.Page`. There is no separate `App` class; `page` is threaded through all screens. Navigation between screens is accomplished by clearing `page.controls` and calling `page.update()`. All event handlers may be `async`; background tasks use `page.run_task()` instead of `asyncio.ensure_future()`. The`toga.MainWindow` pattern is replaced by properties of `ft.Page` (e.g., `page.title`). See `src/zforge/app.py` and `src/zforge/__main__.py` for the entry point.
 
 ## Gameplay Interface

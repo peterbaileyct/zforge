@@ -50,3 +50,18 @@ When modifying LLM prompts:
 - Code implementations (e.g., `getScriptPrompt()` in IfEngineConnector, system prompts in ExperienceGenerationProcess) must reflect the spec.
 
 Note again that prompts for the outsource team are an exception and should not be written to files.
+
+## Spec-to-Code Alignment
+
+**Specs document current intent, not pending work.** If a code file is found to be out of sync with a spec file, the correct response is never to edit the spec file to describe the divergence or to annotate it with pending changes. The spec already expresses the target state. The correct response is to produce a prompt (in chat only, not in any file) instructing the outsource team to bring the code into alignment with the spec.
+
+**Code files must reference their governing spec.** Generated or updated code files should contain a comment near the top (or at the most relevant scope) indicating which spec file, and preferably which section of it, governs that file. For example:
+
+```python
+# Implements: docs/Experience Generation.md § "Experience Generation Process"
+```
+
+Where a single code file spans concepts from multiple spec files, individual functions or classes should carry their own such comments rather than a single file-level comment. Spec files are not responsible for documenting which code files implement them.
+
+## Static Checking
+pyright should be used with strict type checking to prevent runtime errors.

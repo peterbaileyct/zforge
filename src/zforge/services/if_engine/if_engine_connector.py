@@ -46,3 +46,11 @@ class IfEngineConnector(ABC):
     @abstractmethod
     async def restore_state(self, saved_state: bytes) -> ActionResult:
         """Restore a playthrough from saved state; return current position."""
+
+    @abstractmethod
+    async def initialize(self) -> None:
+        """Initialize the engine runtime. Must be called before other methods."""
+
+    @abstractmethod
+    async def get_current_choices(self) -> list[str]:
+        """Get current available choices without making a selection."""

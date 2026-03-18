@@ -3,7 +3,7 @@
 Single-node agentic RAG graph per docs/Ask About World.md:
 
 1. librarian_node — answers a user question about a Z-World by querying its
-   Z-Bundle via retrieve_vector and retrieve_graph tools, then produces a
+   Z-Bundle via query_world and retrieve_source tools, then produces a
    plain-text answer.
 
 Tool calls are executed inline within the librarian node in a while loop —
@@ -15,18 +15,15 @@ docs/Ask About World.md.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
-from langchain_core.tools import tool
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 
-from zforge.graphs.document_parsing_graph import _LLAMA_EXECUTOR
-from zforge.graphs.graph_utils import extract_text_content, log_node, make_retrieve_graph_tool
+from zforge.graphs.graph_utils import extract_text_content, log_node, make_world_query_tools
 from zforge.graphs.state import AskAboutWorldState
 
 log = logging.getLogger(__name__)
@@ -50,14 +47,15 @@ will provide a clear and simple plain-text answer. This will typically be \
 
 
 def _make_librarian_node(
-    llm_connector, embedding_connector, model_name: str | None = None
+    llm_connector: LlmConnector, embedding_connector: EmbeddingConnector, allowed_node_labels: list[str],
+    model_name: str | None = None,
 ):
     """Return an agentic RAG node that answers questions about a Z-World."""
 
-    _model_cache: list = []
+    _model_cache: list[Any] = []
 
     @log_node("librarian")
-    async def librarian_node(state: AskAboutWorldState) -> dict:
+    async def librarian_node(state: AskAboutWorldState) -> dict[str, Any]:
         if not _model_cache:
             _model_cache.append(llm_connector.get_model(model_name))
         model = _model_cache[0]
@@ -65,45 +63,11 @@ def _make_librarian_node(
         z_bundle_root = state["z_bundle_root"]
 
         # Build retriever tools for this Z-Bundle
-        @tool
-        async def retrieve_vector(query: str) -> str:
-            """Search the Z-Bundle's vector store for semantically similar chunks.
+        query_world, retrieve_source = make_world_query_tools(
+            z_bundle_root, allowed_node_labels, embedding_connector
+        )
 
-            Args:
-                query: Natural language search query.
-            """
-            import lancedb
-
-            vector_path = f"{z_bundle_root}/vector"
-            loop = asyncio.get_running_loop()
-            embedder = embedding_connector.get_embeddings()
-            query_vec = await loop.run_in_executor(
-                _LLAMA_EXECUTOR,
-                lambda: embedder.embed_query(query),
-            )
-            db = await lancedb.connect_async(vector_path)
-            table = await db.open_table("chunks")
-            results_arrow = await (
-                await table.search(query_vec, query_type="vector")
-            ).limit(10).to_arrow()
-            texts = results_arrow.column("text").to_pylist()
-            metadatas = results_arrow.column("metadata").to_pylist()
-            if not texts:
-                return "No results found."
-            parts = []
-            for text, meta in zip(texts, metadatas):
-                if not text:
-                    continue
-                breadcrumb = (meta or {}).get("breadcrumb", "")
-                if breadcrumb:
-                    parts.append(f"[Context: {breadcrumb}]\n\n{text}")
-                else:
-                    parts.append(text)
-            return "\n\n---\n\n".join(parts)
-
-        retrieve_graph = make_retrieve_graph_tool(z_bundle_root)
-
-        tools = [retrieve_vector, retrieve_graph]
+        tools = [query_world, retrieve_source]
         tool_map = {t.name: t for t in tools}
         bound_model = model.bind_tools(tools)
 
@@ -120,7 +84,7 @@ def _make_librarian_node(
         # corrupt that template, producing malformed tool calls (tool_use_failed).
         # Keeping the system prompt to plain behavioural instructions only avoids
         # this entirely.
-        messages = [
+        messages: list[BaseMessage] = [
             SystemMessage(content=_LIBRARIAN_SYSTEM_PROMPT),
             HumanMessage(
                 content=world_context + "\n\nQuestion: " + state["user_question"]
@@ -167,6 +131,7 @@ def _make_librarian_node(
 def build_ask_about_world_graph(
     llm_connector: LlmConnector,
     embedding_connector: EmbeddingConnector,
+    allowed_node_labels: list[str],
     model_name: str | None = None,
 ):
     """Build and compile the Ask About World LangGraph StateGraph.
@@ -176,7 +141,9 @@ def build_ask_about_world_graph(
     llm_connector:
         LLM connector for the Librarian node.
     embedding_connector:
-        Embedding connector for the retrieve_vector tool.
+        Embedding connector for the retrieval tools.
+    allowed_node_labels:
+        PascalCase node type names for graph queries.
     model_name:
         Optional model name override.
     """
@@ -184,7 +151,9 @@ def build_ask_about_world_graph(
 
     graph.add_node(
         "librarian",
-        _make_librarian_node(llm_connector, embedding_connector, model_name),
+        _make_librarian_node(
+            llm_connector, embedding_connector, allowed_node_labels, model_name
+        ),
     )
 
     graph.set_entry_point("librarian")
@@ -198,10 +167,11 @@ def build_ask_about_world_graph(
 
 async def run_ask_about_world(
     z_bundle_root: str,
-    zworld_kvp: dict,
+    zworld_kvp: dict[str, Any],
     user_question: str,
     llm_connector: LlmConnector,
     embedding_connector: EmbeddingConnector,
+    allowed_node_labels: list[str],
     model_name: str | None = None,
 ) -> str:
     """Build the Ask About World graph, invoke it, and return the answer.
@@ -217,7 +187,9 @@ async def run_ask_about_world(
     llm_connector:
         LLM connector for the Librarian node.
     embedding_connector:
-        Embedding connector for the retrieve_vector tool.
+        Embedding connector for the retrieval tools.
+    allowed_node_labels:
+        PascalCase node type names for graph queries.
     model_name:
         Optional model name override.
 
@@ -229,6 +201,7 @@ async def run_ask_about_world(
     graph = build_ask_about_world_graph(
         llm_connector=llm_connector,
         embedding_connector=embedding_connector,
+        allowed_node_labels=allowed_node_labels,
         model_name=model_name,
     )
 

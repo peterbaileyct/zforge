@@ -9,19 +9,36 @@ requiring manual instrumentation in each node body.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import functools
 import logging
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, TypeVar
 
 log = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from zforge.services.embedding.embedding_connector import EmbeddingConnector
+
 # Cache open KuzuGraph connections keyed by graph_path to avoid re-opening the
-# database on every retrieve_graph tool call.
+# database on every query_world tool call.
+
 _KUZU_GRAPH_CACHE: dict[str, Any] = {}
 
+# Single-thread executor for all llama.cpp / local-model work.
+# llama.cpp's Metal (GPU) backend on macOS binds its command queue to the OS
+# thread on which the model is first loaded. Using asyncio.to_thread() risks
+# dispatching to a different thread on each call, causing a silent hang.
+# Using a max_workers=1 executor guarantees every call lands on the same thread.
+LLAMA_EXECUTOR: concurrent.futures.ThreadPoolExecutor = (
+    concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="llama")
+)
 
-def log_node(name: str) -> Callable:
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def log_node(name: str) -> Callable[[_F], _F]:
     """Decorator factory that wraps a LangGraph node function with structured logging.
 
     Usage::
@@ -54,8 +71,8 @@ def log_node(name: str) -> Callable:
         A decorator that wraps the node function.
     """
 
-    def decorator(fn: Callable) -> Callable:
-        if asyncio.iscoroutinefunction(fn):
+    def decorator(fn: _F) -> _F:
+        if asyncio.iscoroutinefunction(fn):  # type: ignore[deprecated]
             @functools.wraps(fn)
             async def async_wrapper(state: Any) -> Any:
                 status = state.get("status") if isinstance(state, dict) else "?"
@@ -87,7 +104,7 @@ def log_node(name: str) -> Callable:
                     )
                     raise
 
-            return async_wrapper
+            return async_wrapper  # type: ignore[return-value]
 
         @functools.wraps(fn)
         def wrapper(state: Any) -> Any:
@@ -120,7 +137,7 @@ def log_node(name: str) -> Callable:
                 )
                 raise
 
-        return wrapper
+        return wrapper  # type: ignore[return-value]
 
     return decorator
 
@@ -169,138 +186,276 @@ def chunk_text(text: str, max_chars: int, overlap_chars: int = 200) -> list[str]
     return chunks
 
 
-def make_retrieve_graph_tool(z_bundle_root: str):
-    """Factory that returns a ``retrieve_graph`` LangChain tool for a Z-Bundle.
+def make_world_query_tools(
+    z_bundle_root: str,
+    allowed_node_labels: list[str],
+    embedding_connector: EmbeddingConnector,
+) -> tuple[Any, Any]:
+    """Factory that returns ``(query_world, retrieve_source)`` LangChain tools.
 
-    The returned tool has two execution branches:
-
-    1. **Cypher** — if *query* starts with ``MATCH``, ``WITH``, ``CALL``,
-       ``OPTIONAL``, or ``UNWIND``, it is executed directly via
-       ``KuzuGraph.query()``.  On error or empty results the graph schema is
-       appended so the caller can write a corrected query.
-
-    2. **Keyword / entity-name search** — otherwise, each word in *query* is
-       matched case-insensitively against the ``id`` property of every
-       standard entity node table (Character, Location, Faction, Event, …).
-       For every hit the tool expands one hop of outgoing and incoming
-       relationships (Chunk nodes excluded), returning relationship type,
-       neighbour type, and neighbour id.  Schema is only returned when no
-       entities are found.
+    Both tools query the Z-Bundle at *z_bundle_root*.  ``query_world`` is the
+    primary tool — it combines semantic entity matching, 1-hop graph expansion,
+    and optional neighbour hydration into a single call.  ``retrieve_source``
+    returns verbatim source passages from the ``chunks`` table.
 
     Args:
-        z_bundle_root: Filesystem path to the Z-Bundle root directory,
-            used to open ``{root}/propertygraph``.
+        z_bundle_root: Filesystem path to the Z-Bundle root directory.
+        allowed_node_labels: PascalCase node type names used at ingest time.
+        embedding_connector: Embedding connector (provides ``get_embeddings()``).
+
+    Returns:
+        A ``(query_world, retrieve_source)`` tuple of LangChain tools.
     """
     from langchain_core.tools import tool
 
-    _ENTITY_LABELS = [
-        "Character", "Location", "Faction", "Event", "Occupation",
-        "Species", "Concept", "Artifact", "Prophecy", "Era",
-        "Culture", "Deity", "Trope", "Mechanic",
-    ]
     _CYPHER_STARTS = {"MATCH", "WITH", "CALL", "OPTIONAL", "UNWIND"}
 
-    @tool
-    def retrieve_graph(query: str) -> str:
-        """Query the Z-Bundle's property graph for structured entity data.
+    # ---- Internal helpers ------------------------------------------------
 
-        Pass a Cypher query (starting with MATCH / WITH / CALL) to execute it
-        directly, or pass a keyword or entity name to search for matching
-        entities and their 1-hop relationships.
-
-        Args:
-            query: A Cypher query or a keyword / entity name to look up.
-        """
+    def _get_kuzu_graph() -> Any:
+        """Return a cached KuzuGraph for this Z-Bundle's property graph."""
         import kuzu
         from langchain_community.graphs import KuzuGraph
 
         graph_path = f"{z_bundle_root}/propertygraph"
         if graph_path not in _KUZU_GRAPH_CACHE:
             db = kuzu.Database(graph_path)
-            _KUZU_GRAPH_CACHE[graph_path] = KuzuGraph(db, allow_dangerous_requests=True)
-        graph = _KUZU_GRAPH_CACHE[graph_path]
+            _KUZU_GRAPH_CACHE[graph_path] = KuzuGraph(
+                db, allow_dangerous_requests=True
+            )
+        return _KUZU_GRAPH_CACHE[graph_path]
 
-        q = query.strip()
-        first_word = q.split()[0].upper() if q.split() else ""
+    def _graph_expand_entity(graph: Any, label: str, node_id: str) -> list[str]:
+        """Return formatted 1-hop relationship lines for a single entity.
 
-        # --- Branch 1: Direct Cypher execution ---
-        if first_word in _CYPHER_STARTS:
-            try:
-                rows = graph.query(q)
-                if not rows:
-                    return f"No results.\n\nSchema for reference:\n{graph.get_schema}"
-                return "\n".join(str(r) for r in rows[:50])
-            except Exception as exc:
-                return f"Cypher error: {exc}\n\nSchema for reference:\n{graph.get_schema}"
+        Each line has the form:
+          → rel_type → Neighbour Name (neighbour_type)  [prop: val, ...]
+        or
+          ← rel_type ← Neighbour Name (neighbour_type)  [prop: val, ...]
+        """
+        _REL_PROPS = ("from_time", "to_time", "role", "perspective", "canonical")
+        lines: list[str] = []
 
-        # --- Branch 2: Keyword / entity-name search + 1-hop expansion ---
-        keyword = q.lower()
-        hits: list[tuple[str, str]] = []
-        for label in _ENTITY_LABELS:
-            try:
-                rows = graph.query(
-                    f"MATCH (n:{label}) WHERE toLower(n.id) CONTAINS $kw RETURN n.id LIMIT 8",
-                    params={"kw": keyword},
+        # Outgoing edges
+        try:
+            for row in graph.query(
+                f"MATCH (n:{label})-[r]->(m) WHERE n.id = $nid "
+                f"RETURN type(r) AS rel, label(m) AS m_label, m.id AS target, "
+                + ", ".join(f"r.{p} AS r_{p}" for p in _REL_PROPS)
+                + " LIMIT 50",
+                params={"nid": node_id},
+            ):
+                if row.get("m_label") == "Chunk":
+                    continue
+                props = {
+                    p: row.get(f"r_{p}")
+                    for p in _REL_PROPS
+                    if row.get(f"r_{p}")
+                }
+                prop_str = (
+                    "  [" + ", ".join(f'{k}: "{v}"' for k, v in props.items()) + "]"
+                    if props
+                    else ""
                 )
-                hits.extend((label, row["n.id"]) for row in rows if row.get("n.id"))
-            except Exception:
-                pass  # table may not exist in this world's graph
+                m_type = (row.get("m_label") or "").lower()
+                lines.append(
+                    f"  → {row.get('rel')} → {row.get('target')} ({m_type}){prop_str}"
+                )
+        except Exception:
+            pass
 
-        if not hits:
-            return f"No entities found matching '{q}'.\n\nSchema for reference:\n{graph.get_schema}"
+        # Incoming edges
+        try:
+            for row in graph.query(
+                f"MATCH (m)-[r]->(n:{label}) WHERE n.id = $nid "
+                f"RETURN type(r) AS rel, label(m) AS m_label, m.id AS source, "
+                + ", ".join(f"r.{p} AS r_{p}" for p in _REL_PROPS)
+                + " LIMIT 50",
+                params={"nid": node_id},
+            ):
+                if row.get("m_label") == "Chunk":
+                    continue
+                props = {
+                    p: row.get(f"r_{p}")
+                    for p in _REL_PROPS
+                    if row.get(f"r_{p}")
+                }
+                prop_str = (
+                    "  [" + ", ".join(f'{k}: "{v}"' for k, v in props.items()) + "]"
+                    if props
+                    else ""
+                )
+                m_type = (row.get("m_label") or "").lower()
+                lines.append(
+                    f"  ← {row.get('rel')} ← {row.get('source')} ({m_type}){prop_str}"
+                )
+        except Exception:
+            pass
 
-        # Group hits by label so we can batch outgoing/incoming edge queries
-        # per label (2 queries per unique label) rather than per node (2 per node).
-        from collections import defaultdict
-        hits_by_label: dict[str, list[str]] = defaultdict(list)
-        for label, node_id in hits[:10]:
-            hits_by_label[label].append(node_id)
+        return lines
 
-        hit_lines: dict[tuple[str, str], list[str]] = {
-            (lbl, nid): [f"[{lbl}] {nid}"]
-            for lbl, nid in hits[:10]
-        }
+    # ---- Async vector helpers -------------------------------------------
 
-        for label, node_ids in hits_by_label.items():
-            # Outgoing edges — one query for all matched nodes of this label
-            try:
-                for row in graph.query(
-                    f"MATCH (n:{label})-[r]->(m) WHERE n.id IN $ids "
-                    f"RETURN n.id AS src, type(r) AS rel, label(m) AS m_label, m.id AS target LIMIT 200",
-                    params={"ids": node_ids},
-                ):
-                    if row.get("m_label") == "Chunk":
-                        continue
-                    key = (label, row.get("src"))
-                    if key in hit_lines:
-                        hit_lines[key].append(
-                            f"  -[{row.get('rel')}]-> [{row.get('m_label')}] {row.get('target')}"
+    async def _vector_search(table_name: str, query: str, k: int,
+                             entity_type: str | None = None) -> list[dict[str, Any]]:
+        """Run ANN search on a LanceDB table. Returns list of row dicts."""
+        import lancedb
+
+        vector_path = f"{z_bundle_root}/vector"
+        loop = asyncio.get_running_loop()
+        query_vec = await loop.run_in_executor(
+            LLAMA_EXECUTOR,
+            lambda: embedding_connector.get_embeddings().embed_query(query),  # type: ignore[union-attr]
+        )
+        db = await lancedb.connect_async(vector_path)
+        try:
+            tbl = await db.open_table(table_name)
+        except Exception:
+            if table_name == "entities":
+                try:
+                    tbl = await db.open_table("chunks")
+                except Exception:
+                    return []
+            else:
+                return []
+
+        search_q = await tbl.search(query_vec, query_type="vector")
+        if entity_type:
+            search_q = search_q.where(f"entity_type = '{entity_type}'")
+        results_arrow = await search_q.limit(k).to_arrow()
+        # Convert to list of dicts
+        cols = results_arrow.column_names
+        rows: list[dict[str, Any]] = []
+        for i in range(results_arrow.num_rows):
+            row: dict[str, Any] = {}
+            for col in cols:
+                val = results_arrow.column(col)[i].as_py()
+                row[col] = val
+            rows.append(row)
+        return rows
+
+    # ---- Tool: query_world ----------------------------------------------
+
+    @tool
+    async def query_world(
+        query: str,
+        entity_type: str | None = None,
+        k: int = 3,
+        include_neighbors: bool = False,
+    ) -> str:
+        """Look up entities in the world by description or name.
+
+        Returns entity summaries, relationships, and optionally adjacent entity
+        details.  Use entity_type to restrict to a specific type.  Set
+        include_neighbors=True for network or connection questions.
+
+        Args:
+            query: Natural language search query or entity name.
+            entity_type: Optional entity type filter (snake_case, e.g. "character").
+            k: Number of top entity matches to return (default 3).
+            include_neighbors: If True, also return summaries and relationships
+                for each matched entity's 1-hop neighbours.
+        """
+        # Step 1: Semantic match against entities table
+        rows = await _vector_search("entities", query, k, entity_type)
+        if not rows:
+            return "No matching entities found."
+
+        graph = _get_kuzu_graph()
+        parts: list[str] = []
+
+        for row in rows:
+            eid = row.get("entity_id", "")
+            etype = row.get("entity_type", "")
+            summary = row.get("text", "")
+
+            # Determine the PascalCase label for graph queries
+            pascal_label = None
+            for lbl in allowed_node_labels:
+                if lbl.lower() == etype.replace("_", ""):
+                    pascal_label = lbl
+                    break
+            if not pascal_label:
+                # Try matching by converting snake_case → PascalCase
+                candidate = "".join(w.capitalize() for w in etype.split("_"))
+                if candidate in allowed_node_labels:
+                    pascal_label = candidate
+
+            entity_block = f'[Entity: "{eid}" ({etype})]\nSummary: {summary}'
+
+            # Step 2: Graph expansion
+            if pascal_label:
+                rel_lines = _graph_expand_entity(graph, pascal_label, eid)
+                if rel_lines:
+                    entity_block += "\n\nRelationships:\n" + "\n".join(rel_lines)
+
+                # Step 3: Neighbour hydration (optional)
+                if include_neighbors and pascal_label:
+                    # Collect unique neighbour ids from the rel_lines
+                    neighbour_ids: list[tuple[str, str]] = []
+                    try:
+                        for r in graph.query(
+                            f"MATCH (n:{pascal_label})-[r]-(m) WHERE n.id = $nid "
+                            f"AND NOT label(m) = 'Chunk' "
+                            f"RETURN DISTINCT m.id AS mid, label(m) AS mlabel "
+                            f"LIMIT {k * 3}",
+                            params={"nid": eid},
+                        ):
+                            if r.get("mid") and r.get("mlabel"):
+                                neighbour_ids.append((r["mlabel"], r["mid"]))
+                    except Exception:
+                        pass
+
+                    # Hydrate up to k neighbours
+                    for n_label, n_id in neighbour_ids[:k]:
+                        n_type = n_label.lower()
+                        # Fetch summary from entities table
+                        n_rows = await _vector_search(
+                            "entities", n_id, 1, n_type
                         )
-            except Exception:
-                pass
-            # Incoming edges — one query for all matched nodes of this label
-            try:
-                for row in graph.query(
-                    f"MATCH (m)-[r]->(n:{label}) WHERE n.id IN $ids "
-                    f"RETURN n.id AS tgt, type(r) AS rel, label(m) AS m_label, m.id AS source LIMIT 200",
-                    params={"ids": node_ids},
-                ):
-                    if row.get("m_label") == "Chunk":
-                        continue
-                    key = (label, row.get("tgt"))
-                    if key in hit_lines:
-                        hit_lines[key].append(
-                            f"  <-[{row.get('rel')}]- [{row.get('m_label')}] {row.get('source')}"
-                        )
-            except Exception:
-                pass
+                        n_summary = ""
+                        if n_rows and n_rows[0].get("entity_id") == n_id:
+                            n_summary = n_rows[0].get("text", "")
 
-        parts: list[str] = [
-            "\n".join(hit_lines[(lbl, nid)]) for lbl, nid in hits[:10]
-        ]
+                        n_block = f'\n[Neighbour: "{n_id}" ({n_type})]'
+                        if n_summary:
+                            n_block += f"\nSummary: {n_summary}"
+                        n_rels = _graph_expand_entity(graph, n_label, n_id)
+                        if n_rels:
+                            n_block += "\nRelationships:\n" + "\n".join(n_rels)
+                        entity_block += n_block
+
+            parts.append(entity_block)
+
         return "\n\n".join(parts)
 
-    return retrieve_graph
+    # ---- Tool: retrieve_source ------------------------------------------
+
+    @tool
+    async def retrieve_source(
+        query: str,
+        entity_type: str | None = None,
+        k: int = 5,
+    ) -> str:
+        """Retrieve verbatim source passages from the world text.
+
+        Use when exact wording is required — contradictions, rumours, specific
+        quotes, or when entity summaries may over-synthesize.
+
+        Args:
+            query: Natural language search query.
+            entity_type: Optional entity type filter (snake_case, e.g. "character").
+            k: Number of passages to return (default 5).
+        """
+        rows = await _vector_search("chunks", query, k, entity_type)
+        if not rows:
+            return "No source passages found."
+        texts = [r.get("text", "") for r in rows if r.get("text")]
+        if not texts:
+            return "No source passages found."
+        return "\n\n---\n\n".join(texts)
+
+    return query_world, retrieve_source
 
 
 def extract_text_content(content: Any) -> str:  # noqa: ANN401

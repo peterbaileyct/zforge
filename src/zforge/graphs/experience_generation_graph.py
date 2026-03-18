@@ -21,17 +21,15 @@ docs/Experience Generation.md.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
-from langchain_core.tools import tool
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 
-from zforge.graphs.graph_utils import extract_text_content, log_node, make_retrieve_graph_tool
+from zforge.graphs.graph_utils import extract_text_content, log_node, make_world_query_tools
 from zforge.graphs.state import ExperienceGenerationState
 
 log = logging.getLogger(__name__)
@@ -161,7 +159,7 @@ def _slugify(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
 
 
-def _parse_json_response(content: str) -> dict | None:
+def _parse_json_response(content: str) -> dict[str, Any] | None:
     """Extract a JSON object from an LLM response, tolerating markdown fencing."""
     text = content.strip()
     try:
@@ -195,12 +193,11 @@ def _make_outline_author_node(
     model_name: str | None = None,
 ):
     """Agentic RAG node: produces outline, research notes, and experience title."""
-    from zforge.graphs.document_parsing_graph import _LLAMA_EXECUTOR
 
-    _model_cache: list = []
+    _model_cache: list[Any] = []
 
     @log_node("outline_author")
-    async def outline_author_node(state: ExperienceGenerationState) -> dict:
+    async def outline_author_node(state: ExperienceGenerationState) -> dict[str, Any]:
         if not _model_cache:
             _model_cache.append(llm_connector.get_model(model_name))
         model = _model_cache[0]
@@ -208,33 +205,11 @@ def _make_outline_author_node(
         z_bundle_root = state["z_bundle_root"]
 
         # Build retriever tools for this Z-Bundle
-        @tool
-        async def retrieve_vector(query: str) -> str:
-            """Search the Z-Bundle's vector store for semantically similar chunks.
-
-            Args:
-                query: Natural language search query.
-            """
-            import lancedb
-
-            vector_path = f"{z_bundle_root}/vector"
-            loop = asyncio.get_running_loop()
-            query_vec = await loop.run_in_executor(
-                _LLAMA_EXECUTOR,
-                lambda: embedding_connector.get_embeddings().embed_query(query),
-            )
-            db = await lancedb.connect_async(vector_path)
-            table = await db.open_table("chunks")
-            results_arrow = await (
-                await table.search(query_vec, query_type="vector")
-            ).limit(5).to_arrow()
-            texts = results_arrow.column("text").to_pylist()
-            if not texts:
-                return "No results found."
-            return "\n\n---\n\n".join(t for t in texts if t)
-
-        retrieve_graph = make_retrieve_graph_tool(z_bundle_root)
-        tools = [retrieve_vector, retrieve_graph]
+        from zforge.graphs.world_creation_graph import ALLOWED_NODES
+        query_world, retrieve_source = make_world_query_tools(
+            z_bundle_root, ALLOWED_NODES, embedding_connector
+        )
+        tools = [query_world, retrieve_source]
 
         # Build messages
         world_context = json.dumps(state["zworld_kvp"], indent=2)
@@ -251,7 +226,7 @@ def _make_outline_author_node(
                 f"feedback. Revise accordingly:\n{state['outline_feedback']}"
             )
 
-        messages = [
+        messages: list[BaseMessage] = [
             SystemMessage(content=_OUTLINE_AUTHOR_PROMPT),
             HumanMessage(content="\n".join(human_parts)),
         ]
@@ -320,6 +295,7 @@ def _make_outline_author_node(
 
 def _make_dual_reviewer_node(
     llm_connector: LlmConnector,
+    embedding_connector: EmbeddingConnector,
     model_name: str | None,
     node_name: str,
     artifact_key: str,
@@ -332,12 +308,14 @@ def _make_dual_reviewer_node(
 ):
     """Factory for dual-review nodes (Tech Editor + Story Editor).
 
-    Used by both outline_reviewer and prose_reviewer.
+    Used by both outline_reviewer and prose_reviewer.  The Story Editor role
+    has access to ``query_world`` and ``retrieve_source`` tools for lore
+    verification; the Tech Editor does not use retrieval tools.
     """
-    _model_cache: list = []
+    _model_cache: list[Any] = []
 
     @log_node(node_name)
-    async def reviewer_node(state: ExperienceGenerationState) -> dict:
+    async def reviewer_node(state: ExperienceGenerationState) -> dict[str, Any]:
         if not _model_cache:
             _model_cache.append(llm_connector.get_model(model_name))
         model = _model_cache[0]
@@ -350,7 +328,7 @@ def _make_dual_reviewer_node(
             f"Draft to review:\n{artifact}"
         )
 
-        # Tech Editor review
+        # Tech Editor review (no tools — structural review only)
         tech_messages = [
             SystemMessage(content=_TECH_EDITOR_PROMPT),
             HumanMessage(content=human_content),
@@ -359,12 +337,47 @@ def _make_dual_reviewer_node(
         tech_content = extract_text_content(getattr(tech_response, "content", ""))
         tech_result = _parse_json_response(tech_content) or {"status": "PASS", "feedback": ""}
 
-        # Story Editor review
-        story_messages = [
+        # Story Editor review (agentic — with query_world + retrieve_source)
+        z_bundle_root = state["z_bundle_root"]
+        from zforge.graphs.world_creation_graph import ALLOWED_NODES
+        query_world, retrieve_source = make_world_query_tools(
+            z_bundle_root, ALLOWED_NODES, embedding_connector
+        )
+        story_tools = [query_world, retrieve_source]
+        story_tool_map = {t.name: t for t in story_tools}
+        story_bound = model.bind_tools(story_tools)
+
+        story_messages: list[BaseMessage] = [
             SystemMessage(content=_STORY_EDITOR_PROMPT),
             HumanMessage(content=human_content),
         ]
-        story_response = await model.ainvoke(story_messages)
+
+        # Agentic tool-call loop for Story Editor
+        while True:
+            story_response = await story_bound.ainvoke(story_messages)
+            story_messages.append(story_response)
+
+            if not (hasattr(story_response, "tool_calls") and story_response.tool_calls):
+                break
+
+            for tc in story_response.tool_calls:
+                tool_fn = story_tool_map.get(tc["name"])
+                if tool_fn:
+                    result = await tool_fn.ainvoke(tc["args"])
+                    log.info(
+                        "%s: story editor tool %s returned %d chars",
+                        node_name,
+                        tc["name"],
+                        len(str(result)),
+                    )
+                    story_messages.append(
+                        ToolMessage(
+                            content=str(result),
+                            tool_call_id=tc["id"],
+                            name=tc["name"],
+                        )
+                    )
+
         story_content = extract_text_content(getattr(story_response, "content", ""))
         story_result = _parse_json_response(story_content) or {"status": "PASS", "feedback": ""}
 
@@ -418,45 +431,22 @@ def _make_prose_writer_node(
     model_name: str | None = None,
 ):
     """Agentic RAG node: expands outline into vivid prose draft."""
-    from zforge.graphs.document_parsing_graph import _LLAMA_EXECUTOR
 
-    _model_cache: list = []
+    _model_cache: list[Any] = []
 
     @log_node("prose_writer")
-    async def prose_writer_node(state: ExperienceGenerationState) -> dict:
+    async def prose_writer_node(state: ExperienceGenerationState) -> dict[str, Any]:
         if not _model_cache:
             _model_cache.append(llm_connector.get_model(model_name))
         model = _model_cache[0]
 
         z_bundle_root = state["z_bundle_root"]
 
-        @tool
-        async def retrieve_vector(query: str) -> str:
-            """Search the Z-Bundle's vector store for semantically similar chunks.
-
-            Args:
-                query: Natural language search query.
-            """
-            import lancedb
-
-            vector_path = f"{z_bundle_root}/vector"
-            loop = asyncio.get_running_loop()
-            query_vec = await loop.run_in_executor(
-                _LLAMA_EXECUTOR,
-                lambda: embedding_connector.get_embeddings().embed_query(query),
-            )
-            db = await lancedb.connect_async(vector_path)
-            table = await db.open_table("chunks")
-            results_arrow = await (
-                await table.search(query_vec, query_type="vector")
-            ).limit(5).to_arrow()
-            texts = results_arrow.column("text").to_pylist()
-            if not texts:
-                return "No results found."
-            return "\n\n---\n\n".join(t for t in texts if t)
-
-        retrieve_graph = make_retrieve_graph_tool(z_bundle_root)
-        tools = [retrieve_vector, retrieve_graph]
+        from zforge.graphs.world_creation_graph import ALLOWED_NODES
+        query_world, retrieve_source = make_world_query_tools(
+            z_bundle_root, ALLOWED_NODES, embedding_connector
+        )
+        tools = [query_world, retrieve_source]
 
         human_parts = [
             f"Outline:\n{state.get('outline', '')}",
@@ -468,7 +458,7 @@ def _make_prose_writer_node(
                 f"feedback. Revise accordingly:\n{state['prose_feedback']}"
             )
 
-        messages = [
+        messages: list[BaseMessage] = [
             SystemMessage(content=_PROSE_WRITER_PROMPT),
             HumanMessage(content="\n".join(human_parts)),
         ]
@@ -521,10 +511,10 @@ def _make_ink_scripter_node(
     model_name: str | None = None,
 ):
     """Translates prose draft into Ink script."""
-    _model_cache: list = []
+    _model_cache: list[Any] = []
 
     @log_node("ink_scripter")
-    async def ink_scripter_node(state: ExperienceGenerationState) -> dict:
+    async def ink_scripter_node(state: ExperienceGenerationState) -> dict[str, Any]:
         if not _model_cache:
             _model_cache.append(llm_connector.get_model(model_name))
         model = _model_cache[0]
@@ -578,7 +568,7 @@ def _make_ink_compile_check_node(if_engine_connector: IfEngineConnector):
     """Non-LLM node: invokes IfEngineConnector.build() on the current script."""
 
     @log_node("ink_compile_check")
-    async def ink_compile_check_node(state: ExperienceGenerationState) -> dict:
+    async def ink_compile_check_node(state: ExperienceGenerationState) -> dict[str, Any]:
         script = state.get("ink_script", "") or ""
         build_result = await if_engine_connector.build(script)
 
@@ -620,10 +610,10 @@ def _make_ink_debugger_node(
     model_name: str | None = None,
 ):
     """Fixes compiler errors in Ink script."""
-    _model_cache: list = []
+    _model_cache: list[Any] = []
 
     @log_node("ink_debugger")
-    async def ink_debugger_node(state: ExperienceGenerationState) -> dict:
+    async def ink_debugger_node(state: ExperienceGenerationState) -> dict[str, Any]:
         if not _model_cache:
             _model_cache.append(llm_connector.get_model(model_name))
         model = _model_cache[0]
@@ -668,10 +658,10 @@ def _make_ink_qa_node(
     model_name: str | None = None,
 ):
     """Virtual playtest: checks pathing, dead ends, and flow."""
-    _model_cache: list = []
+    _model_cache: list[Any] = []
 
     @log_node("ink_qa")
-    async def ink_qa_node(state: ExperienceGenerationState) -> dict:
+    async def ink_qa_node(state: ExperienceGenerationState) -> dict[str, Any]:
         if not _model_cache:
             _model_cache.append(llm_connector.get_model(model_name))
         model = _model_cache[0]
@@ -718,10 +708,10 @@ def _make_ink_auditor_node(
     model_name: str | None = None,
 ):
     """Final structural audit of the Ink script."""
-    _model_cache: list = []
+    _model_cache: list[Any] = []
 
     @log_node("ink_auditor")
-    async def ink_auditor_node(state: ExperienceGenerationState) -> dict:
+    async def ink_auditor_node(state: ExperienceGenerationState) -> dict[str, Any]:
         if not _model_cache:
             _model_cache.append(llm_connector.get_model(model_name))
         model = _model_cache[0]
@@ -908,6 +898,7 @@ def build_experience_generation_graph(
         "outline_reviewer",
         _make_dual_reviewer_node(
             outline_reviewer_connector,
+            embedding_connector,
             outline_reviewer_model,
             node_name="outline_reviewer",
             artifact_key="outline",
@@ -929,6 +920,7 @@ def build_experience_generation_graph(
         "prose_reviewer",
         _make_dual_reviewer_node(
             prose_reviewer_connector,
+            embedding_connector,
             prose_reviewer_model,
             node_name="prose_reviewer",
             artifact_key="prose_draft",

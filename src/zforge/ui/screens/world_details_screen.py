@@ -40,10 +40,11 @@ class WorldDetailsScreen:
 
         zworld = mgr.zworld_manager.read(self._slug)
         if zworld is None:
-            return ft.Column([
+            not_found: list[ft.Control] = [
                 ft.Text(f"World '{self._slug}' not found."),
                 ft.ElevatedButton("Back", on_click=self._on_back),
-            ])
+            ]
+            return ft.Column(not_found)
 
         controls: list[ft.Control] = []
 
@@ -86,7 +87,7 @@ class WorldDetailsScreen:
 
         return ft.Column(controls, spacing=10, expand=True)
 
-    def _on_ask(self, e: ft.ControlEvent) -> None:
+    def _on_ask(self, e: ft.Event[ft.Button]) -> None:
         question = self._question_input.value.strip()
         if not question:
             self._answer_area.value = "Please enter a question."
@@ -115,6 +116,6 @@ class WorldDetailsScreen:
             self._ask_btn.disabled = False
             self._page.update()
 
-    def _on_back(self, e: ft.ControlEvent) -> None:
+    def _on_back(self, e: ft.Event[ft.Button]) -> None:
         if self._on_done:
             self._on_done()
