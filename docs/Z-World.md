@@ -54,13 +54,12 @@ organization: A named group of agents united by shared structure or
 # --- Place ---
 
 location: Any place of narrative importance regardless of scale — from
-  a single room up to a city, moon, or pocket dimension. Includes
-  constructed places such as buildings, dungeons, and vessels.
+  a single room up to a continent, moon, or pocket dimension. Includes
+  constructed places such as buildings, dungeons, and vessels. A location
+  can contain other locations at any scale (room in a house; city in a
+  kingdom; kingdom in a continent) via the LOCATION contains LOCATION
+  relationship.
   Classifier flags: is_constructed (bool)
-
-region: A large-scale named territory that contains locations — a
-  continent, kingdom, biome, plane of existence, or star system.
-  Regions are traversed rather than visited directly.
 
 
 # --- Object ---
@@ -112,6 +111,16 @@ law: A named rule, statute, or system of governance that carries
 myth: A widely held story, legend, or belief that may or may not be
   literally true. Valuable for tracking unreliable world history and
   distinguishing fact from legend at generation time.
+
+concept: A named cultural construct, social role, title, or abstract idea
+  that is recognised within the world — a world-specific social designation
+  such as "Bigwings" (protective elder companion in a hatching cohort), a
+  taboo, a rite of passage, a cultural institution, or any category of
+  meaning that does not fit belief_system, law, or myth. Concepts are the
+  first-class home for world-specific vocabulary that would otherwise be
+  lost in a traits string or missed entirely. They can be answered
+  definitively by the librarian ("what is a Bigwings?") and can carry
+  known instances via the AGENT affiliated_with AGENT relationship.
 
 
 # --- Narrative Structure ---
@@ -185,24 +194,12 @@ LOCATION contains LOCATION
             accessibility (open/restricted/secret/impassable),
             spatial_relation (within/beneath/above/adjacent/overlapping)
 
-LOCATION nested_in REGION
-  e.g. Ankh-Morpork nested_in the Sto Plains
-  metadata: certainty, canonical, source
-
-REGION nested_in REGION
-  e.g. the Sto Plains nested_in the Disc's central continent
-  metadata: certainty, canonical, source
-
 LOCATION adjacent_to LOCATION
   e.g. Sto Lat adjacent_to Ankh-Morpork
   metadata: certainty, canonical, source,
             travel_time, route_description, is_passable (bool)
 
-REGION adjacent_to REGION
-  e.g. the Ramtops adjacent_to the Sto Plains
-  metadata: certainty, canonical, source
-
-SPECIES native_to REGION
+SPECIES native_to LOCATION
   e.g. trolls native_to the Ramtop mountains
   metadata: certainty, canonical, source,
             is_endemic (bool)
@@ -258,7 +255,7 @@ AGENT controls LOCATION
             control_type (founded/conquered/occupied/vassal/protectorate),
             title
 
-AGENT rules REGION
+AGENT rules LOCATION
   e.g. the Low King rules the dwarfish kingdoms
   metadata: from_time, to_time, certainty, canonical, source,
             title
@@ -311,6 +308,21 @@ AGENT betrayed AGENT
 AGENT mentored AGENT
   e.g. Granny Weatherwax mentored Tiffany Aching
   metadata: from_time, to_time, certainty, canonical, source
+
+AGENT affiliated_with AGENT
+  e.g. Clay affiliated_with Asha
+  Captures world-specific role-bonds that cannot be expressed by the
+  standard social vocabulary — culturally-instituted designations such as
+  "Bigwings" (protective elder in a dragonet cohort), oath-bound
+  guardianship, ceremonial kinship, or any dyadic tie whose name is
+  drawn from world-specific vocabulary. The affiliation_type field carries
+  the world-specific label extracted from prose.
+  metadata: from_time, to_time, certainty, canonical, source,
+            affiliation_type (string — the world-specific label,
+                              e.g. "Bigwings", "Sworn Shield"),
+            scope (string — who or what the role applies to,
+                   e.g. "of the dragonets of destiny"),
+            is_mutual (bool)
 
 AGENT loves AGENT
   e.g. Moist loves Adora Belle
@@ -466,7 +478,7 @@ AGENT practices CULTURE
   e.g. the Watch practices the culture of civic duty
   metadata: from_time, to_time, certainty, canonical, source
 
-BELIEF_SYSTEM practised_in REGION
+BELIEF_SYSTEM practised_in LOCATION
   e.g. headology practised_in the Ramtops
   metadata: certainty, canonical, source,
             prevalence (universal/common/rare/forbidden)
@@ -599,11 +611,11 @@ The `AGENT` and `ENTITY` shorthand used in the relationship declarations above m
 
 ### `allowed_nodes`
 
-`Character`, `Species`, `Organization`, `Location`, `Region`, `Item`, `Event`, `TimePeriod`, `Culture`, `BeliefSystem`, `Law`, `Myth`, `Conflict`, `Goal`
+`Character`, `Species`, `Organization`, `Location`, `Item`, `Event`, `TimePeriod`, `Culture`, `BeliefSystem`, `Law`, `Myth`, `Concept`, `Conflict`, `Goal`
 
 ### `allowed_relationships`
 
-`is_a`, `instance_of`, `subtype_of`, `lives_in`, `located_in`, `originates_from`, `born_in`, `died_at`, `contains`, `nested_in`, `adjacent_to`, `native_to`, `occurs_within`, `born_during`, `died_during`, `overlaps`, `preceded_by`, `named_after`, `owns`, `controls`, `rules`, `created_by`, `knows`, `related_to`, `descended_from`, `allied_with`, `enemy_of`, `loyal_to`, `betrayed`, `mentored`, `loves`, `fears`, `member_of`, `employed_by`, `opposes`, `operates_through`, `founded_by`, `based_in`, `participated_in`, `witnessed`, `caused`, `triggered_by`, `resulted_in`, `occurred_at`, `founded`, `created`, `destroyed`, `affected_by`, `wants`, `targets`, `seeks`, `believes_in`, `follows`, `governed_by`, `belongs_to`, `practices`, `practised_in`, `knows_about`, `hides`, `reveals`, `misinformed_about`, `symbol_of`, `part_of`, `originated_in`, `conflicts_with`, `derived_from`, `governs`, `embodies`, `believed_by`, `about`, `involves`, `between`
+`is_a`, `instance_of`, `subtype_of`, `lives_in`, `located_in`, `originates_from`, `born_in`, `died_at`, `contains`, `adjacent_to`, `native_to`, `occurs_within`, `born_during`, `died_during`, `overlaps`, `preceded_by`, `named_after`, `owns`, `controls`, `rules`, `created_by`, `knows`, `related_to`, `descended_from`, `allied_with`, `enemy_of`, `loyal_to`, `betrayed`, `mentored`, `affiliated_with`, `loves`, `fears`, `member_of`, `employed_by`, `opposes`, `operates_through`, `founded_by`, `based_in`, `participated_in`, `witnessed`, `caused`, `triggered_by`, `resulted_in`, `occurred_at`, `founded`, `created`, `destroyed`, `affected_by`, `wants`, `targets`, `seeks`, `believes_in`, `follows`, `governed_by`, `belongs_to`, `practices`, `practised_in`, `knows_about`, `hides`, `reveals`, `misinformed_about`, `symbol_of`, `part_of`, `originated_in`, `conflicts_with`, `derived_from`, `governs`, `embodies`, `believed_by`, `about`, `involves`, `between`
 
 ### `relationship_properties`
 
@@ -657,7 +669,6 @@ The `entity_type` column in LanceDB uses **snake_case**; KuzuDB node table names
 | `Species` | `species` |
 | `Organization` | `organization` |
 | `Location` | `location` |
-| `Region` | `region` |
 | `Item` | `item` |
 | `Event` | `event` |
 | `TimePeriod` | `time_period` |
@@ -665,6 +676,7 @@ The `entity_type` column in LanceDB uses **snake_case**; KuzuDB node table names
 | `BeliefSystem` | `belief_system` |
 | `Law` | `law` |
 | `Myth` | `myth` |
+| `Concept` | `concept` |
 | `Conflict` | `conflict` |
 | `Goal` | `goal` |
 | `Chunk` | `chunk` |

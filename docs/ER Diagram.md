@@ -72,7 +72,7 @@ Z-Worlds are persisted as Z-Bundles at `bundles/world/{slug}/`:
 - `vector/` — LanceDB vector store (document chunk embeddings; table name `chunks`)
 - `propertygraph` — KùzuDB property graph file (schema-less entity nodes and relationship edges, managed by `KuzuGraph.add_graph_documents`)
 
-Entity types (Character, Location, Event, Faction, Artifact, Era, Culture, Deity, Prophecy, Concept, Mechanic, Trope, Species, Occupation) are no longer Python dataclasses — they exist as schema-less nodes in KuzuDB, created dynamically by `LLMGraphTransformer`.
+Entity types (Character, Species, Organization, Location, Item, Event, TimePeriod, Culture, BeliefSystem, Law, Myth, Concept, Conflict, Goal) are no longer Python dataclasses — they exist as schema-less nodes in KuzuDB, created dynamically by `LLMGraphTransformer`.
 
 ```mermaid
 erDiagram

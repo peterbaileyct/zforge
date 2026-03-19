@@ -28,25 +28,25 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 ALLOWED_NODES: list[str] = [
-    "Character", "Species", "Organization", "Location", "Region",
+    "Character", "Species", "Organization", "Location",
     "Item", "Event", "TimePeriod", "Culture", "BeliefSystem",
-    "Law", "Myth", "Conflict", "Goal",
+    "Law", "Myth", "Concept", "Conflict", "Goal",
 ]
 
 ALLOWED_RELATIONSHIPS: list[str] = [
     "is_a", "instance_of", "subtype_of", "lives_in", "located_in",
-    "originates_from", "born_in", "died_at", "contains", "nested_in",
+    "originates_from", "born_in", "died_at", "contains",
     "adjacent_to", "native_to", "occurs_within", "born_during",
     "died_during", "overlaps", "preceded_by", "named_after", "owns",
     "controls", "rules", "created_by", "knows", "related_to",
     "descended_from", "allied_with", "enemy_of", "loyal_to", "betrayed",
-    "mentored", "loves", "fears", "member_of", "employed_by", "opposes",
-    "operates_through", "founded_by", "based_in", "participated_in",
-    "witnessed", "caused", "triggered_by", "resulted_in", "occurred_at",
-    "founded", "created", "destroyed", "affected_by", "wants", "targets",
-    "seeks", "believes_in", "follows", "governed_by", "belongs_to",
-    "practices", "practised_in", "knows_about", "hides", "reveals",
-    "misinformed_about", "symbol_of", "part_of", "originated_in",
+    "mentored", "affiliated_with", "loves", "fears", "member_of",
+    "employed_by", "opposes", "operates_through", "founded_by", "based_in",
+    "participated_in", "witnessed", "caused", "triggered_by", "resulted_in",
+    "occurred_at", "founded", "created", "destroyed", "affected_by",
+    "wants", "targets", "seeks", "believes_in", "follows", "governed_by",
+    "belongs_to", "practices", "practised_in", "knows_about", "hides",
+    "reveals", "misinformed_about", "symbol_of", "part_of", "originated_in",
     "conflicts_with", "derived_from", "governs", "embodies", "believed_by",
     "about", "involves", "between",
 ]
