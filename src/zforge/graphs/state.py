@@ -49,6 +49,10 @@ class ExperienceGenerationState(TypedDict):
     qa_feedback: str | None
     audit_feedback: str | None
 
+    # Arbiter inputs (set by reviewer when Story Editor rejects; cleared by arbiter)
+    story_editor_feedback: str | None   # Raw Story Editor rejection reason
+    tech_editor_feedback: str | None    # Raw Tech Editor rejection reason when TE also failed
+
     # Iteration counters — use operator.add reducer so nodes return 1 to increment
     outline_review_count: Annotated[int, operator.add]
     prose_review_count: Annotated[int, operator.add]
@@ -59,6 +63,10 @@ class ExperienceGenerationState(TypedDict):
     status: str
     status_message: str
     failure_reason: str | None
+
+    # Observability — set per-node, replaced (not accumulated) on each update
+    last_step_rationale: str | None     # 1-2 sentence decision summary from reviewer/QA/auditor nodes
+    action_log: list[dict[str, Any]]    # Tool call and event records emitted by agentic nodes
 
     # LangGraph message history — for observability
     messages: Annotated[list[BaseMessage], add_messages]

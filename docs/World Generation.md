@@ -152,7 +152,7 @@ Most parsing implementation details are covered in the [Document Parsing](Parsin
 - **LLM nodes** (defined in `process_config.py`):
   - `summarizer` — Step 2 metadata extraction; default `Google` / `gemini-2.5-flash-lite`
 - **Implementation file:** `src/zforge/graphs/world_creation_graph.py` (full rewrite)
-- **`allowed_nodes` / `allowed_relationships`:** Listed in Step 1 above; authoritative source is [Z-World.md](Z-World.md).
+- **`allowed_nodes` / `allowed_relationships`:** Listed in Step 1 above; authoritative source is [Z-World.md](Z-World.md). Code constants `ALLOWED_NODES` / `ALLOWED_RELATIONSHIPS` are defined in `src/zforge/graphs/graph_utils.py` (shared by world creation, experience generation, and ask-about-world graphs).
 - **`ZWorld` Python model** (`src/zforge/models/zworld.py`) — Replace the existing entity-heavy model (which holds `Character`, `Location`, `Event`, etc. as Python objects) with a simple KVP dataclass. All entity data is now stored in LanceDB and KuzuDB by the document-parsing pipeline; the Python object only represents the KVP fields:
   ```python
   @dataclass

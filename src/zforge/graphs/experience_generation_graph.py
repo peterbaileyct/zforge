@@ -1,16 +1,18 @@
 """LangGraph experience generation graph.
 
-Eight-node pipeline per docs/Experience Generation.md:
+Ten-node pipeline per docs/Experience Generation.md:
 
-1. outline_author — agentic RAG; produces outline, research notes, title
-2. outline_reviewer — dual review (Tech Editor + Story Editor); PASS/FAIL
-3. prose_writer — agentic RAG; expands outline into prose draft
-4. prose_reviewer — dual review; PASS/FAIL
-5. ink_scripter — translates prose draft into Ink script
-6. ink_compile_check — non-LLM; invokes IfEngineConnector.build()
-7. ink_debugger — fixes compiler errors in Ink script
-8. ink_qa — virtual playtest for pathing errors
-9. ink_auditor — final structural audit
+1.  outline_author — agentic RAG; produces outline, research notes, title
+2.  outline_reviewer — dual review (Tech Editor + Story Editor); PASS/FAIL
+3.  arbiter_outline — overrules Story Editor when rejection stems from player premise
+4.  prose_writer — agentic RAG; expands outline into prose draft
+5.  prose_reviewer — dual review; PASS/FAIL
+6.  arbiter_prose — same as arbiter_outline but for prose stage
+7.  ink_scripter — translates prose draft into Ink script
+8.  ink_compile_check — non-LLM; invokes IfEngineConnector.build()
+9.  ink_debugger — fixes compiler errors in Ink script
+10. ink_qa — virtual playtest for pathing errors
+11. ink_auditor — final structural audit
 
 Tool calls are executed inline within agentic RAG nodes — no ToolNode is
 used (per docs/Processes.md § LangGraph tool call pattern).
@@ -29,8 +31,16 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 
-from zforge.graphs.graph_utils import extract_text_content, log_node, make_world_query_tools
+from zforge.graphs.graph_utils import (
+    ALLOWED_NODES,
+    extract_text_content,
+    log_node,
+    make_world_query_tools,
+)
 from zforge.graphs.state import ExperienceGenerationState
+
+# Pre-computed string for injecting into LLM prompts at module load time.
+_ENTITY_TYPES = ", ".join(ALLOWED_NODES)
 
 log = logging.getLogger(__name__)
 
@@ -52,11 +62,12 @@ MAX_SCRIPT_REWRITE_ITERATIONS = 5
 # Specifications)
 # ---------------------------------------------------------------------------
 
-_OUTLINE_AUTHOR_PROMPT = """\
+_OUTLINE_AUTHOR_PROMPT = f"""\
 You are a Lead Narrative Designer. Convert world data and player intent into \
 a structural "beat sheet."
 1. Query the Z-World hybrid data store to gather specific keys relevant to \
-the prompt.
+the prompt. The valid entity_type values for query_world are: {_ENTITY_TYPES}. \
+Do not query for any other entity type.
 2. Create an Outline: Structured Markdown of scenes and branching points \
 (using === knot_names ===).
 3. Create Research Notes: A bulleted list of factual data retrieved from \
@@ -73,6 +84,11 @@ respond with ONLY a JSON object (no markdown fencing) with exactly these keys:
 _TECH_EDITOR_PROMPT = """\
 You are the Logic Police. Your focus is the internal consistency of the \
 story being built.
+CRITICAL RULE: The player prompt establishes the founding premise of this \
+experience. Do NOT penalise character relationships, motivations, or \
+scenarios that follow directly from the player's stated premise, even if \
+they seem unusual or contrary to established canon. Accept the premise as \
+given and evaluate consistency within it.
 1. Plot Holes: Ensure actions have clear motivations and that the player \
 can't bypass critical story beats.
 2. Branching Value: Ensure choices are meaningful and don't immediately \
@@ -82,11 +98,22 @@ can't bypass critical story beats.
 exactly these keys: "status" (either "PASS" or "FAIL") and "feedback" \
 (notes on plot logic)."""
 
-_STORY_EDITOR_PROMPT = """\
+_STORY_EDITOR_PROMPT = f"""\
 You are the Lore Police. Your focus is the external consistency between \
 the draft and the Z-World metadata.
-1. Lore Adherence: Ensure no violations of world data (e.g., if \
-world.tech_level: medieval, flag any mention of steam engines).
+When using query_world to verify lore, the valid entity_type values are: \
+{_ENTITY_TYPES}. Do not query for any other entity type.
+CRITICAL RULE: The player prompt establishes the creative premise of this \
+experience and may intentionally diverge from established world canon \
+(e.g., an alternate-universe scenario where normally hostile factions are \
+friendly, or a playful crossover). Do NOT flag the player's stated premise \
+itself as a lore violation. Treat it as an accepted given. Your job is to \
+ensure that the Z-World details referenced within the draft \
+(entity names, traits, locations, world mechanics) are accurately \
+represented once the premise is in play.
+1. Lore Adherence: Ensure world facts are used accurately (e.g., if \
+world.tech_level: medieval, flag any mention of steam engines \
+unrelated to the premise).
 2. Fact-Checking: Cross-reference mentions of NPCs, artifacts, or \
 locations against the specific key-value pairs provided.
 3. Tone: Ensure the draft matches the "voice" established in the world \
@@ -95,11 +122,12 @@ metadata.
 exactly these keys: "status" (either "PASS" or "FAIL") and "feedback" \
 (notes on Z-World violations)."""
 
-_PROSE_WRITER_PROMPT = """\
+_PROSE_WRITER_PROMPT = f"""\
 You are a Professional Fiction Author. Expand the Outline into vivid \
 narrative text.
 1. Use Research Notes (derived from the Z-World data store) for sensory \
-details.
+details. If you call query_world for additional detail, valid entity_type \
+values are: {_ENTITY_TYPES}. Do not query for any other entity type.
 2. Write dialogue and descriptions. Mark choices with [Choice Text].
 3. Focus on quality of prose while respecting the "World Consistency" notes.
 
@@ -148,6 +176,30 @@ Respond with ONLY a JSON object (no markdown fencing) with exactly these \
 keys: "status" (either "PASS" or "FAIL") and "feedback" (notes on \
 structural issues)."""
 
+_ARBITER_PROMPT = """\
+You are a Senior Creative Director arbitrating a dispute between the \
+Story Editor (Lore Police) and the player.
+
+The player has submitted a premise for their interactive experience. \
+The Story Editor reviewed the draft and rejected it with a lore concern. \
+Your task is to determine whether the Story Editor's rejection is \
+primarily targeting the player's stated premise itself — i.e., the editor \
+is penalising a creative divergence the player deliberately introduced — \
+rather than a genuine error in the draft's execution of world facts.
+
+Rules:
+- If the Story Editor's rejection is caused by, or flows directly from, \
+the player's premise (e.g., the editor flags a faction alignment, \
+relationship, or scenario that the player explicitly set up), \
+choose OVERRULE.
+- If the rejection is caused by the writer misrepresenting world facts \
+that are not covered or implied by the player's premise, choose UPHOLD.
+
+Respond with ONLY a JSON object (no markdown fencing) with exactly \
+these keys:
+- "verdict": either "OVERRULE" or "UPHOLD"
+- "reason": a one-sentence explanation"""
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -157,6 +209,14 @@ structural issues)."""
 def _slugify(title: str) -> str:
     """Convert a title to a kebab-case slug."""
     return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+
+
+def _first_sentence(text: str, max_len: int = 120) -> str:
+    """Return the first sentence of *text*, truncated to *max_len* chars."""
+    if not text:
+        return ""
+    sentence = text.strip().split(".")[0].strip()
+    return sentence[:max_len]
 
 
 def _parse_json_response(content: str) -> dict[str, Any] | None:
@@ -205,7 +265,6 @@ def _make_outline_author_node(
         z_bundle_root = state["z_bundle_root"]
 
         # Build retriever tools for this Z-Bundle
-        from zforge.graphs.world_creation_graph import ALLOWED_NODES
         query_world, retrieve_source = make_world_query_tools(
             z_bundle_root, ALLOWED_NODES, embedding_connector
         )
@@ -234,6 +293,7 @@ def _make_outline_author_node(
         # Agentic RAG loop
         bound_model = model.bind_tools(tools)
         tool_map = {t.name: t for t in tools}
+        tool_calls_log: list[dict[str, Any]] = []
 
         while True:
             response = await bound_model.ainvoke(messages)
@@ -247,9 +307,15 @@ def _make_outline_author_node(
                 if tool_fn:
                     result = await tool_fn.ainvoke(tc["args"])
                     log.info(
-                        "outline_author: tool %s returned %d chars",
-                        tc["name"], len(str(result)),
+                        "outline_author: tool %s args=%r returned %d chars",
+                        tc["name"], tc["args"], len(str(result)),
                     )
+                    tool_calls_log.append({
+                        "type": "tool_call",
+                        "node": "outline_author",
+                        "tool": tc["name"],
+                        "args": tc["args"],
+                    })
                     messages.append(
                         ToolMessage(
                             content=str(result),
@@ -267,6 +333,8 @@ def _make_outline_author_node(
                 "status": "failed",
                 "failure_reason": "Outline author did not produce valid JSON",
                 "status_message": "Experience generation failed: outline output was not valid JSON",
+                "last_step_rationale": None,
+                "action_log": tool_calls_log,
                 "outline_review_count": 0,
                 "prose_review_count": 0,
                 "compile_fix_count": 0,
@@ -283,6 +351,8 @@ def _make_outline_author_node(
             "outline_feedback": None,
             "status": "reviewing_outline",
             "status_message": f"Outline '{title}' drafted; under review...",
+            "last_step_rationale": None,
+            "action_log": tool_calls_log,
             "outline_review_count": 0,
             "prose_review_count": 0,
             "compile_fix_count": 0,
@@ -303,6 +373,7 @@ def _make_dual_reviewer_node(
     counter_key: str,
     pass_status: str,
     fail_status: str,
+    story_rejected_status: str,
     pass_message: str,
     fail_message: str,
 ):
@@ -339,13 +410,13 @@ def _make_dual_reviewer_node(
 
         # Story Editor review (agentic — with query_world + retrieve_source)
         z_bundle_root = state["z_bundle_root"]
-        from zforge.graphs.world_creation_graph import ALLOWED_NODES
         query_world, retrieve_source = make_world_query_tools(
             z_bundle_root, ALLOWED_NODES, embedding_connector
         )
         story_tools = [query_world, retrieve_source]
         story_tool_map = {t.name: t for t in story_tools}
         story_bound = model.bind_tools(story_tools)
+        story_tool_calls_log: list[dict[str, Any]] = []
 
         story_messages: list[BaseMessage] = [
             SystemMessage(content=_STORY_EDITOR_PROMPT),
@@ -365,11 +436,19 @@ def _make_dual_reviewer_node(
                 if tool_fn:
                     result = await tool_fn.ainvoke(tc["args"])
                     log.info(
-                        "%s: story editor tool %s returned %d chars",
+                        "%s: story editor tool %s args=%r returned %d chars",
                         node_name,
                         tc["name"],
+                        tc["args"],
                         len(str(result)),
                     )
+                    story_tool_calls_log.append({
+                        "type": "tool_call",
+                        "node": node_name,
+                        "role": "story_editor",
+                        "tool": tc["name"],
+                        "args": tc["args"],
+                    })
                     story_messages.append(
                         ToolMessage(
                             content=str(result),
@@ -400,29 +479,171 @@ def _make_dual_reviewer_node(
         }
 
         if both_pass:
+            rationale = f"{node_name}: Both editors approved — logic sound and lore consistent."
             return {
                 **zero_counters,
+                "story_editor_feedback": None,
+                "tech_editor_feedback": None,
                 "status": pass_status,
                 "status_message": pass_message,
+                "last_step_rationale": rationale,
+                "action_log": story_tool_calls_log,
             }
 
-        # Combine feedback from both editors
+        tech_fb = tech_result.get("feedback", "")
+        story_fb = story_result.get("feedback", "")
+
+        # Build combined feedback (used if arbiter upholds or only tech failed)
         feedback_parts = []
         if not tech_pass:
-            feedback_parts.append(f"[Technical Editor] {tech_result.get('feedback', '')}")
+            feedback_parts.append(f"[Technical Editor] {tech_fb}")
         if not story_pass:
-            feedback_parts.append(f"[Story Editor] {story_result.get('feedback', '')}")
+            feedback_parts.append(f"[Story Editor] {story_fb}")
         combined_feedback = "\n\n".join(feedback_parts)
 
+        if not story_pass:
+            # Route to Arbiter regardless of whether Tech Editor also failed.
+            # Arbiter determines if Story Editor rejection is premise-based.
+            if not tech_pass and not story_pass:
+                rationale = (
+                    f"{node_name}: Both editors rejected — sending to Arbiter; "
+                    f"tech: {_first_sentence(tech_fb)}; lore: {_first_sentence(story_fb)}."
+                )
+            else:
+                rationale = (
+                    f"{node_name}: Story Editor rejected — sending to Arbiter; "
+                    f"{_first_sentence(story_fb)}."
+                )
+            return {
+                **zero_counters,
+                # No counter increment yet — Arbiter will increment if it upholds.
+                feedback_key: combined_feedback,
+                "story_editor_feedback": story_fb,
+                "tech_editor_feedback": tech_fb if not tech_pass else None,
+                "status": story_rejected_status,
+                "status_message": f"Story Editor rejected — sending to Arbiter...",
+                "last_step_rationale": rationale,
+                "action_log": story_tool_calls_log,
+            }
+
+        # Only Tech Editor failed — normal revision loop, no Arbiter needed.
+        rationale = f"{node_name}: Technical Editor rejected — {_first_sentence(tech_fb)}."
         return {
             **zero_counters,
             counter_key: 1,
-            feedback_key: combined_feedback,
+            feedback_key: f"[Technical Editor] {tech_fb}",
+            "story_editor_feedback": None,
+            "tech_editor_feedback": tech_fb,
             "status": fail_status,
             "status_message": fail_message,
+            "last_step_rationale": rationale,
+            "action_log": story_tool_calls_log,
         }
 
     return reviewer_node
+
+
+def _make_arbiter_node(
+    llm_connector: LlmConnector,
+    model_name: str | None,
+    node_name: str,
+    feedback_key: str,
+    counter_key: str,
+    pass_status: str,
+    fail_status: str,
+    pass_message: str,
+    fail_message: str,
+):
+    """Arbiter node: overrules Story Editor when its rejection stems from the player's premise.
+
+    Receives only the player prompt and the Story Editor's rejection reason.
+    Does not see the outline/prose draft.  If the verdict is OVERRULE and the
+    Tech Editor had also failed, the revision loop continues with only the tech
+    feedback visible to the writer.
+    """
+    _model_cache: list[Any] = []
+
+    @log_node(node_name)
+    async def arbiter_node(state: ExperienceGenerationState) -> dict[str, Any]:
+        if not _model_cache:
+            _model_cache.append(llm_connector.get_model(model_name))
+        model = _model_cache[0]
+
+        player_prompt = state.get("player_prompt") or "(no player prompt provided)"
+        story_feedback = state.get("story_editor_feedback") or ""
+
+        messages = [
+            SystemMessage(content=_ARBITER_PROMPT),
+            HumanMessage(
+                content=(
+                    f"Player premise:\n{player_prompt}\n\n"
+                    f"Story Editor rejection reason:\n{story_feedback}"
+                )
+            ),
+        ]
+
+        response = await model.ainvoke(messages)
+        content = extract_text_content(getattr(response, "content", ""))
+        result = _parse_json_response(content) or {"verdict": "UPHOLD", "reason": ""}
+
+        verdict = result.get("verdict", "UPHOLD").upper()
+        reason = result.get("reason", "")
+        tech_feedback = state.get("tech_editor_feedback")
+
+        log.info("%s: verdict=%s reason=%r", node_name, verdict, reason)
+
+        zero_counters = {
+            "outline_review_count": 0,
+            "prose_review_count": 0,
+            "compile_fix_count": 0,
+            "script_rewrite_count": 0,
+        }
+
+        if verdict == "OVERRULE":
+            if tech_feedback:
+                # Story Editor overruled, but Tech Editor still failed — continue
+                # the revision loop with only the tech feedback visible.
+                rationale = (
+                    f"{node_name}: Story Editor overruled — {reason}. "
+                    f"Tech Editor rejection stands; revising."
+                )
+                return {
+                    **zero_counters,
+                    counter_key: 1,
+                    feedback_key: f"[Technical Editor] {tech_feedback}",
+                    "story_editor_feedback": None,
+                    "tech_editor_feedback": None,
+                    "status": fail_status,
+                    "status_message": fail_message,
+                    "last_step_rationale": rationale,
+                    "action_log": [],
+                }
+            # Story Editor overruled and Tech Editor had also passed → continue.
+            rationale = f"{node_name}: Story Editor overruled — {reason}. Proceeding."
+            return {
+                **zero_counters,
+                "story_editor_feedback": None,
+                "tech_editor_feedback": None,
+                "status": pass_status,
+                "status_message": pass_message,
+                "last_step_rationale": rationale,
+                "action_log": [],
+            }
+
+        # UPHOLD — Story Editor rejection stands; revision loop with combined feedback.
+        rationale = f"{node_name}: Story Editor upheld — {reason}. Revising."
+        return {
+            **zero_counters,
+            counter_key: 1,
+            "story_editor_feedback": None,
+            "tech_editor_feedback": None,
+            "status": fail_status,
+            "status_message": fail_message,
+            "last_step_rationale": rationale,
+            "action_log": [],
+        }
+
+    return arbiter_node
 
 
 def _make_prose_writer_node(
@@ -442,7 +663,6 @@ def _make_prose_writer_node(
 
         z_bundle_root = state["z_bundle_root"]
 
-        from zforge.graphs.world_creation_graph import ALLOWED_NODES
         query_world, retrieve_source = make_world_query_tools(
             z_bundle_root, ALLOWED_NODES, embedding_connector
         )
@@ -465,6 +685,7 @@ def _make_prose_writer_node(
 
         bound_model = model.bind_tools(tools)
         tool_map = {t.name: t for t in tools}
+        tool_calls_log: list[dict[str, Any]] = []
 
         while True:
             response = await bound_model.ainvoke(messages)
@@ -478,9 +699,15 @@ def _make_prose_writer_node(
                 if tool_fn:
                     result = await tool_fn.ainvoke(tc["args"])
                     log.info(
-                        "prose_writer: tool %s returned %d chars",
-                        tc["name"], len(str(result)),
+                        "prose_writer: tool %s args=%r returned %d chars",
+                        tc["name"], tc["args"], len(str(result)),
                     )
+                    tool_calls_log.append({
+                        "type": "tool_call",
+                        "node": "prose_writer",
+                        "tool": tc["name"],
+                        "args": tc["args"],
+                    })
                     messages.append(
                         ToolMessage(
                             content=str(result),
@@ -496,6 +723,8 @@ def _make_prose_writer_node(
             "prose_feedback": None,
             "status": "reviewing_prose",
             "status_message": "Prose draft written; under review...",
+            "last_step_rationale": None,
+            "action_log": tool_calls_log,
             "outline_review_count": 0,
             "prose_review_count": 0,
             "compile_fix_count": 0,
@@ -690,14 +919,19 @@ def _make_ink_qa_node(
                 **zero_counters,
                 "status": "auditing",
                 "status_message": "QA passed; final audit...",
+                "last_step_rationale": "ink_qa: Playtest passed — all paths reachable and endings valid.",
+                "action_log": [],
             }
 
+        rationale = f"ink_qa: Pathing issue — {_first_sentence(result.get('feedback', ''))}." if result.get('feedback') else "ink_qa: QA found pathing errors in the script."
         return {
             **zero_counters,
             "script_rewrite_count": 1,
             "qa_feedback": result.get("feedback", ""),
             "status": "rewriting_script",
             "status_message": "QA found pathing issues; rewriting script...",
+            "last_step_rationale": rationale,
+            "action_log": [],
         }
 
     return ink_qa_node
@@ -740,14 +974,19 @@ def _make_ink_auditor_node(
                 **zero_counters,
                 "status": "complete",
                 "status_message": "Final audit passed — experience complete!",
+                "last_step_rationale": "ink_auditor: Final audit passed — script structure verified.",
+                "action_log": [],
             }
 
+        rationale = f"ink_auditor: Structural issue — {_first_sentence(result.get('feedback', ''))}." if result.get('feedback') else "ink_auditor: Auditor flagged structural problems."
         return {
             **zero_counters,
             "script_rewrite_count": 1,
             "audit_feedback": result.get("feedback", ""),
             "status": "rewriting_script",
             "status_message": "Auditor found structural issues; rewriting script...",
+            "last_step_rationale": rationale,
+            "action_log": [],
         }
 
     return ink_auditor_node
@@ -759,17 +998,16 @@ def _make_ink_auditor_node(
 
 
 def _route_after_outline_review(state: ExperienceGenerationState) -> str:
-    """Route after outline_reviewer: PASS → prose_writer, FAIL → loop or fail."""
+    """Route after outline_reviewer: PASS → prose_writer, Story Editor FAIL → arbiter_outline, Tech Only FAIL → loop or fail."""
     status = state.get("status", "")
     if status == "writing_prose":
         return "prose_writer"
+    if status == "arbiter_review_outline":
+        return "arbiter_outline"
     if status == "failed":
         return "end"
-    # FAIL — check iteration cap
-    total = sum(
-        state.get(k, 0)
-        for k in ("outline_review_count",)
-    )
+    # Tech-only FAIL — check iteration cap
+    total = state.get("outline_review_count", 0)
     if total >= MAX_REVIEW_ITERATIONS:
         log.warning("outline_reviewer: max review iterations reached")
         return "end"
@@ -777,18 +1015,45 @@ def _route_after_outline_review(state: ExperienceGenerationState) -> str:
 
 
 def _route_after_prose_review(state: ExperienceGenerationState) -> str:
-    """Route after prose_reviewer: PASS → ink_scripter, FAIL → loop or fail."""
+    """Route after prose_reviewer: PASS → ink_scripter, Story Editor FAIL → arbiter_prose, Tech Only FAIL → loop or fail."""
+    status = state.get("status", "")
+    if status == "scripting":
+        return "ink_scripter"
+    if status == "arbiter_review_prose":
+        return "arbiter_prose"
+    if status == "failed":
+        return "end"
+    total = state.get("prose_review_count", 0)
+    if total >= MAX_REVIEW_ITERATIONS:
+        log.warning("prose_reviewer: max review iterations reached")
+        return "end"
+    return "prose_writer"
+
+
+def _route_after_arbiter_outline(state: ExperienceGenerationState) -> str:
+    """Route after arbiter_outline: overruled-full-pass → prose_writer, needs-revision → outline_author or fail."""
+    status = state.get("status", "")
+    if status == "writing_prose":
+        return "prose_writer"
+    if status == "failed":
+        return "end"
+    total = state.get("outline_review_count", 0)
+    if total >= MAX_REVIEW_ITERATIONS:
+        log.warning("arbiter_outline: max review iterations reached")
+        return "end"
+    return "outline_author"
+
+
+def _route_after_arbiter_prose(state: ExperienceGenerationState) -> str:
+    """Route after arbiter_prose: overruled-full-pass → ink_scripter, needs-revision → prose_writer or fail."""
     status = state.get("status", "")
     if status == "scripting":
         return "ink_scripter"
     if status == "failed":
         return "end"
-    total = sum(
-        state.get(k, 0)
-        for k in ("prose_review_count",)
-    )
+    total = state.get("prose_review_count", 0)
     if total >= MAX_REVIEW_ITERATIONS:
-        log.warning("prose_reviewer: max review iterations reached")
+        log.warning("arbiter_prose: max review iterations reached")
         return "end"
     return "prose_writer"
 
@@ -855,8 +1120,10 @@ def _route_after_auditor(state: ExperienceGenerationState) -> str:
 def build_experience_generation_graph(
     outline_author_connector: LlmConnector,
     outline_reviewer_connector: LlmConnector,
+    arbiter_outline_connector: LlmConnector,
     prose_writer_connector: LlmConnector,
     prose_reviewer_connector: LlmConnector,
+    arbiter_prose_connector: LlmConnector,
     ink_scripter_connector: LlmConnector,
     ink_debugger_connector: LlmConnector,
     ink_qa_connector: LlmConnector,
@@ -865,8 +1132,10 @@ def build_experience_generation_graph(
     if_engine_connector: IfEngineConnector,
     outline_author_model: str | None = None,
     outline_reviewer_model: str | None = None,
+    arbiter_outline_model: str | None = None,
     prose_writer_model: str | None = None,
     prose_reviewer_model: str | None = None,
+    arbiter_prose_model: str | None = None,
     ink_scripter_model: str | None = None,
     ink_debugger_model: str | None = None,
     ink_qa_model: str | None = None,
@@ -906,7 +1175,22 @@ def build_experience_generation_graph(
             counter_key="outline_review_count",
             pass_status="writing_prose",
             fail_status="revising_outline",
+            story_rejected_status="arbiter_review_outline",
             pass_message="Outline approved; writing prose...",
+            fail_message="Outline needs revision...",
+        ),
+    )
+    graph.add_node(
+        "arbiter_outline",
+        _make_arbiter_node(
+            arbiter_outline_connector,
+            arbiter_outline_model,
+            node_name="arbiter_outline",
+            feedback_key="outline_feedback",
+            counter_key="outline_review_count",
+            pass_status="writing_prose",
+            fail_status="revising_outline",
+            pass_message="Outline approved (Story Editor overruled); writing prose...",
             fail_message="Outline needs revision...",
         ),
     )
@@ -928,7 +1212,22 @@ def build_experience_generation_graph(
             counter_key="prose_review_count",
             pass_status="scripting",
             fail_status="revising_prose",
+            story_rejected_status="arbiter_review_prose",
             pass_message="Prose approved; scripting...",
+            fail_message="Prose needs revision...",
+        ),
+    )
+    graph.add_node(
+        "arbiter_prose",
+        _make_arbiter_node(
+            arbiter_prose_connector,
+            arbiter_prose_model,
+            node_name="arbiter_prose",
+            feedback_key="prose_feedback",
+            counter_key="prose_review_count",
+            pass_status="scripting",
+            fail_status="revising_prose",
+            pass_message="Prose approved (Story Editor overruled); scripting...",
             fail_message="Prose needs revision...",
         ),
     )
@@ -961,6 +1260,16 @@ def build_experience_generation_graph(
         _route_after_outline_review,
         {
             "prose_writer": "prose_writer",
+            "arbiter_outline": "arbiter_outline",
+            "outline_author": "outline_author",
+            "end": END,
+        },
+    )
+    graph.add_conditional_edges(
+        "arbiter_outline",
+        _route_after_arbiter_outline,
+        {
+            "prose_writer": "prose_writer",
             "outline_author": "outline_author",
             "end": END,
         },
@@ -969,6 +1278,16 @@ def build_experience_generation_graph(
     graph.add_conditional_edges(
         "prose_reviewer",
         _route_after_prose_review,
+        {
+            "ink_scripter": "ink_scripter",
+            "arbiter_prose": "arbiter_prose",
+            "prose_writer": "prose_writer",
+            "end": END,
+        },
+    )
+    graph.add_conditional_edges(
+        "arbiter_prose",
+        _route_after_arbiter_prose,
         {
             "ink_scripter": "ink_scripter",
             "prose_writer": "prose_writer",

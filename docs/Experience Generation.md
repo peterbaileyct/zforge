@@ -24,6 +24,7 @@ flowchart TD
         A6[Senior Scripter]
         A7[QA Analyst]
         A8[Final Technical Reviewer]
+        A9[Arbiter]
     end
 
     %% Subgraph: External Tools
@@ -49,7 +50,11 @@ flowchart TD
     S3 & S1 --> Node_Review_Outline
     T1_qw & T1_rs --- Node_Review_Outline
 
-    Node_Review_Outline -- "Logic/Lore Error" --> Node_Outline
+    Node_Review_Outline -- "Logic Error (Tech Only)" --> Node_Outline
+    Node_Review_Outline -- "Story Editor Rejected" --> Node_Arbiter_Outline{arbiter_outline}
+    A9 -.-> Node_Arbiter_Outline
+    Node_Arbiter_Outline -- "Overruled" --> Node_Prose
+    Node_Arbiter_Outline -- "Upheld / Tech Also Fails" --> Node_Outline
     Node_Review_Outline -- "Approved" --> Node_Prose
 
     %% Step 2: Prose Polishing
@@ -65,6 +70,10 @@ flowchart TD
     T1_qw & T1_rs --- Node_Review_Prose
 
     Node_Review_Prose -- "Tone/Lore/Logic Fix" --> Node_Prose
+    Node_Review_Prose -- "Story Editor Rejected" --> Node_Arbiter_Prose{arbiter_prose}
+    A9 -.-> Node_Arbiter_Prose
+    Node_Arbiter_Prose -- "Overruled" --> Node_Script
+    Node_Arbiter_Prose -- "Upheld / Tech Also Fails" --> Node_Prose
     Node_Review_Prose -- "Approved" --> Node_Script
 
     %% Step 3: Scripting & Technical Loops
@@ -125,20 +134,22 @@ The following are provided as inputs to the graph at entry:
         3.	Create Research Notes (S3a): A bulleted list of factual data retrieved from the Z-World store (e.g., location name, notable traits, key relationships). Keep these distinct from the outline.
         4.	Adhere to the Player Preference scale (1-10).        
 * **Technical Editor (Internal Consistency)** — nodes: `outline_reviewer`, `prose_reviewer`, default: `Anthropic` / `claude-haiku-4-5`
-    * Acts as the "Logic Police." Monitors internal plot consistency, pacing, and ensuring branching choices have actual narrative value. Does not use retrieval tools (structural review only).
+    * Acts as the "Logic Police." Monitors internal plot consistency, pacing, and ensuring branching choices have actual narrative value. Does not use retrieval tools (structural review only). **The player prompt's premise is accepted as given — do not penalise relationships or scenarios that follow directly from it.**
         * Prompt:
         ```
         You are the Logic Police. Your focus is the internal consistency of the story being built.
+        CRITICAL RULE: The player prompt establishes the founding premise of this experience. Do NOT penalise character relationships, motivations, or scenarios that follow directly from the player's stated premise, even if they seem unusual or contrary to established canon. Accept the premise as given and evaluate consistency within it.
         1.	Plot Holes: Ensure actions have clear motivations and that the player can't bypass critical story beats.
         2.	Branching Value: Ensure choices are meaningful and don't immediately "fold" back to the same result.
         3.	Pacing: Check if the sequence of events feels earned.
         4.	Output: {"status": "PASS/FAIL", "feedback": "Notes on plot logic"}.
 * **Story Editor (World Consistency)** — nodes: `outline_reviewer`, `prose_reviewer`, default: `Anthropic` / `claude-haiku-4-5`
-    * Acts as the "Lore Police." Enforces external consistency by cross-referencing all content against the Z-World store. Has access to `query_world` and `retrieve_source` tools to verify entity traits, relationships, and verbatim lore details.
+    * Acts as the "Lore Police." Enforces external consistency by cross-referencing all content against the Z-World store. Has access to `query_world` and `retrieve_source` tools to verify entity traits, relationships, and verbatim lore details. **The player prompt's premise is accepted as given — an AU or crossover scenario that diverges from canon is not itself a violation.**
         * Prompt:
         ```
         You are the Lore Police. Your focus is the external consistency between the draft and the Z-World KV Store (S1).
-        1.	Lore Adherence: Ensure no violations of world data (e.g., if world.tech_level: medieval, flag any mention of steam engines).
+        CRITICAL RULE: The player prompt establishes the creative premise of this experience and may intentionally diverge from established world canon (e.g., an alternate-universe scenario where normally hostile factions are friendly, or a playful crossover). Do NOT flag the player's stated premise itself as a lore violation. Treat it as an accepted given. Your job is to ensure that the Z-World details referenced within the draft (entity names, traits, locations, world mechanics) are accurately represented once the premise is in play.
+        1.	Lore Adherence: Ensure world facts are used accurately (e.g., if world.tech_level: medieval, flag any mention of steam engines unrelated to the premise).
         2.	Fact-Checking: Cross-reference mentions of NPCs, artifacts, or locations against the specific key-value pairs provided.
         3.	Tone: Ensure the draft matches the "voice" established in the world metadata.
         4.	Output: {"status": "PASS/FAIL", "feedback": "Notes on Z-World violations"}.
@@ -183,6 +194,18 @@ The following are provided as inputs to the graph at entry:
         1.	Variable Integrity: Ensure variables are initialized before being checked.
         2.	State Logic: Verify that flag-setting is placed logically relative to diverts.
         3.	Structural Polish: Check for "sticky" choices or nested logic traps specific to Ink.
+* **Arbiter (Premise Defender)** — nodes: `arbiter_outline`, `arbiter_prose`, default: `Google` / `gemini-2.5-flash-lite`
+    * Dispute resolution. Activated only when the Story Editor rejects a draft. Receives exclusively the **player's premise** and the **Story Editor's rejection reason** (no outline, no prose). Determines whether the rejection targets a lore divergence the player deliberately introduced (OVERRULE) or a genuine world-fact error in the draft (UPHOLD).
+    * If OVERRULE and the Tech Editor had also failed, the revision loop continues with only the Tech Editor's feedback.
+    * If OVERRULE and the Tech Editor had passed, generation proceeds to the next stage.
+        * Prompt:
+        ```
+        You are a Senior Creative Director arbitrating a dispute between the Story Editor (Lore Police) and the player.
+        The player has submitted a premise for their interactive experience. The Story Editor reviewed the draft and rejected it with a lore concern. Your task is to determine whether the Story Editor's rejection is primarily targeting the player's stated premise itself — i.e., the editor is penalising a creative divergence the player deliberately introduced — rather than a genuine error in the draft's execution of world facts.
+        Rules:
+        - If the Story Editor's rejection is caused by, or flows directly from, the player's premise (e.g., the editor flags a faction alignment, relationship, or scenario that the player explicitly set up), choose OVERRULE.
+        - If the rejection is caused by the writer misrepresenting world facts that are not covered or implied by the player's premise, choose UPHOLD.
+        Output: {"verdict": "OVERRULE/UPHOLD", "reason": "one-sentence explanation"}
 
 ## Output
 
@@ -193,7 +216,21 @@ where `world_slug` is the input world slug, and `experience_slug` is the kebab-c
 ## Implementation
 
 - **Process slug:** `experience_generation`
-- **LLM nodes:** `outline_author`, `outline_reviewer`, `prose_writer`, `prose_reviewer`, `ink_scripter`, `ink_debugger`, `ink_qa`, `ink_auditor`
+- **LLM nodes:** `outline_author`, `outline_reviewer`, `arbiter_outline`, `prose_writer`, `prose_reviewer`, `arbiter_prose`, `ink_scripter`, `ink_debugger`, `ink_qa`, `ink_auditor`
+
+### Observability State Fields
+
+Two additional fields in `ExperienceGenerationState` drive live UI feedback during generation:
+
+- **`last_step_rationale: str | None`** — Set by each review/QA/audit/arbiter node (`outline_reviewer`, `arbiter_outline`, `prose_reviewer`, `arbiter_prose`, `ink_qa`, `ink_auditor`) to a 1–2 sentence summary of the decision. Displayed in the UI below the status label and appended to the action log.
+
+- **`action_log: list[dict[str, Any]]`** — Set by agentic RAG nodes (`outline_author`, `prose_writer`, and the Story Editor sub-loop inside reviewer nodes) to record each tool call made during that node's execution. Entries have `type: "tool_call"` and carry `node`, `role`, `tool`, and `args` keys. The `run_process` runner fires `on_rationale_update` for each entry immediately when the node completes. These appear in the UI action log as `> [role] tool_name(arg_preview)` lines so it is visible which world-store queries the reviewers relied on.
+
+- **`story_editor_feedback: str | None`** — Set by `outline_reviewer`/`prose_reviewer` when the Story Editor fails; consumed by `arbiter_outline`/`arbiter_prose`. Cleared to `None` by the arbiter after use.
+
+- **`tech_editor_feedback: str | None`** — Set by `outline_reviewer`/`prose_reviewer` when the Tech Editor also fails (alongside a Story Editor rejection). Used by the arbiter to reconstruct tech-only feedback if it overrules the Story Editor but the Tech Editor rejection stands.
+
+  These fields are **not accumulated** across nodes — each node replaces them with its own output. Nodes that emit neither (e.g. `ink_scripter`, `ink_debugger`) simply omit both keys from their return dict.
 
 ### Pitfalls
 

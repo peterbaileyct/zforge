@@ -21,6 +21,36 @@ log = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from zforge.services.embedding.embedding_connector import EmbeddingConnector
 
+# ---------------------------------------------------------------------------
+# Z-World entity schema — authoritative per docs/Z-World.md § allowed_nodes
+# Centralised here (rather than world_creation_graph) so experience_generation
+# and ask_about_world graphs can import them at module level without circularity.
+# ---------------------------------------------------------------------------
+
+ALLOWED_NODES: list[str] = [
+    "Character", "Species", "Organization", "Location", "Region",
+    "Item", "Event", "TimePeriod", "Culture", "BeliefSystem",
+    "Law", "Myth", "Conflict", "Goal",
+]
+
+ALLOWED_RELATIONSHIPS: list[str] = [
+    "is_a", "instance_of", "subtype_of", "lives_in", "located_in",
+    "originates_from", "born_in", "died_at", "contains", "nested_in",
+    "adjacent_to", "native_to", "occurs_within", "born_during",
+    "died_during", "overlaps", "preceded_by", "named_after", "owns",
+    "controls", "rules", "created_by", "knows", "related_to",
+    "descended_from", "allied_with", "enemy_of", "loyal_to", "betrayed",
+    "mentored", "loves", "fears", "member_of", "employed_by", "opposes",
+    "operates_through", "founded_by", "based_in", "participated_in",
+    "witnessed", "caused", "triggered_by", "resulted_in", "occurred_at",
+    "founded", "created", "destroyed", "affected_by", "wants", "targets",
+    "seeks", "believes_in", "follows", "governed_by", "belongs_to",
+    "practices", "practised_in", "knows_about", "hides", "reveals",
+    "misinformed_about", "symbol_of", "part_of", "originated_in",
+    "conflicts_with", "derived_from", "governs", "embodies", "believed_by",
+    "about", "involves", "between",
+]
+
 # Cache open KuzuGraph connections keyed by graph_path to avoid re-opening the
 # database on every query_world tool call.
 

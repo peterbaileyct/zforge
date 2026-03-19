@@ -95,12 +95,30 @@ class ZForgeManager:
                         )
                         if on_status_update and msg:
                             on_status_update(msg)
-                        if on_rationale_update and "action_log" in node_output:
-                            for entry in node_output["action_log"]:
-                                on_rationale_update(entry.get("rationale", ""), entry)
-                        elif on_rationale_update and msg:
-                            # Fallback: if no structured action_log, treat status_message
-                            # as a rationale entry so it appears in the console.
+                        # Fire per-event action_log entries (tool calls, etc.)
+                        action_log: list[dict[str, Any]] = node_output.get("action_log") or []
+                        if on_rationale_update:
+                            for entry in action_log:
+                                if entry.get("type") == "tool_call":
+                                    args = entry.get("args") or {}
+                                    args_preview = ", ".join(
+                                        f"{k}={str(v)[:40]!r}" for k, v in args.items()
+                                    )
+                                    label = f"[{entry.get('role', entry.get('node', node_name))}] {entry.get('tool', '?')}({args_preview})"
+                                else:
+                                    label = entry.get("rationale") or entry.get("msg", "")
+                                log.info("run_process: [event] node=%r %r", node_name, label)
+                                on_rationale_update(label, entry)
+                        # Fire last_step_rationale from reviewer/QA/auditor nodes
+                        rationale: str | None = node_output.get("last_step_rationale")
+                        if on_rationale_update and rationale:
+                            log.info("run_process: [rationale] node=%r %r", node_name, rationale)
+                            on_rationale_update(
+                                rationale,
+                                {"type": "rationale", "node": node_name, "rationale": rationale},
+                            )
+                        elif on_rationale_update and msg and not action_log and rationale is None:
+                            # Fallback for nodes that provide neither structured events nor rationale
                             on_rationale_update(msg, {"rationale": msg, "node": node_name})
         except Exception as exc:  # surface unexpected errors to caller/UI
             log.exception("run_process: unhandled exception — %s", exc)
@@ -388,8 +406,8 @@ class ZForgeManager:
         if self._experience_generation_graph is None:
             log.info("start_experience_generation: building graph (first call)")
             node_slugs = [
-                "outline_author", "outline_reviewer",
-                "prose_writer", "prose_reviewer",
+                "outline_author", "outline_reviewer", "arbiter_outline",
+                "prose_writer", "prose_reviewer", "arbiter_prose",
                 "ink_scripter", "ink_debugger",
                 "ink_qa", "ink_auditor",
             ]
@@ -403,10 +421,14 @@ class ZForgeManager:
                 outline_author_model=connectors["outline_author"][1],
                 outline_reviewer_connector=connectors["outline_reviewer"][0],
                 outline_reviewer_model=connectors["outline_reviewer"][1],
+                arbiter_outline_connector=connectors["arbiter_outline"][0],
+                arbiter_outline_model=connectors["arbiter_outline"][1],
                 prose_writer_connector=connectors["prose_writer"][0],
                 prose_writer_model=connectors["prose_writer"][1],
                 prose_reviewer_connector=connectors["prose_reviewer"][0],
                 prose_reviewer_model=connectors["prose_reviewer"][1],
+                arbiter_prose_connector=connectors["arbiter_prose"][0],
+                arbiter_prose_model=connectors["arbiter_prose"][1],
                 ink_scripter_connector=connectors["ink_scripter"][0],
                 ink_scripter_model=connectors["ink_scripter"][1],
                 ink_debugger_connector=connectors["ink_debugger"][0],
@@ -437,6 +459,8 @@ class ZForgeManager:
             "prose_feedback": None,
             "qa_feedback": None,
             "audit_feedback": None,
+            "story_editor_feedback": None,
+            "tech_editor_feedback": None,
             "outline_review_count": 0,
             "prose_review_count": 0,
             "compile_fix_count": 0,
@@ -444,6 +468,8 @@ class ZForgeManager:
             "status": "outlining",
             "status_message": "Starting experience generation...",
             "failure_reason": None,
+            "last_step_rationale": None,
+            "action_log": [],
             "messages": [],
         }
 
@@ -493,7 +519,7 @@ class ZForgeManager:
         str
             Plain-text answer string.
         """
-        from zforge.graphs.world_creation_graph import ALLOWED_NODES
+        from zforge.graphs.graph_utils import ALLOWED_NODES
 
         lib_connector, lib_model = self._resolve_node_connector(
             "ask_about_world", "librarian"

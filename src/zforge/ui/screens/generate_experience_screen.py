@@ -96,8 +96,19 @@ class GenerateExperienceScreen:
             self._page.update()
 
         def on_rationale(msg: str, entry: dict[str, Any]) -> None:
-            self._rationale_label.value = msg
-            self._action_log.value += f"\n- {msg}"
+            entry_type = entry.get("type", "rationale")
+            if entry_type == "tool_call":
+                tool = entry.get("tool", "?")
+                role = entry.get("role", entry.get("node", "?"))
+                args = entry.get("args") or {}
+                args_preview = ", ".join(
+                    f"{k}={str(v)[:50]!r}" for k, v in args.items()
+                )
+                display = f"  > [{role}] {tool}({args_preview})"
+                self._action_log.value = (self._action_log.value or "") + f"\n{display}"
+            else:
+                self._rationale_label.value = msg
+                self._action_log.value = (self._action_log.value or "") + f"\n- {msg}"
             self._page.update()
 
         try:

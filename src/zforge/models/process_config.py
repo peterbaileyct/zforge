@@ -127,6 +127,18 @@ PROCESSES: list[ProcessSpec] = [
                 default_provider="Anthropic",
                 default_model="claude-sonnet-4-5",
             ),
+            NodeSpec(
+                slug="arbiter_outline",
+                display="Arbiter (Outline)",
+                default_provider="Google",
+                default_model="gemini-2.5-flash-lite",
+            ),
+            NodeSpec(
+                slug="arbiter_prose",
+                display="Arbiter (Prose)",
+                default_provider="Google",
+                default_model="gemini-2.5-flash-lite",
+            ),
         ),
     ),
 ]

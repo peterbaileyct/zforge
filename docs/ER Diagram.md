@@ -78,7 +78,7 @@ Entity types (Character, Location, Event, Faction, Artifact, Era, Culture, Deity
 erDiagram
     ZBundle {
         string type_slug "e.g. world"
-        string slug "e.g. discworld"
+        string slug "e.g. the-dragonet-prophecy"
     }
     KVPStore {
         string path "kvp.json"
@@ -151,7 +151,7 @@ Process objects are not persisted but track multi-step LLM workflows. See [Manag
 ```mermaid
 erDiagram
     ExperienceGenerationProcess {
-        string status "outlining, reviewing_outline, writing_prose, reviewing_prose, scripting, compiling, debugging, qa, auditing, complete, failed"
+        string status "outlining, reviewing_outline, arbiter_review_outline, writing_prose, reviewing_prose, arbiter_review_prose, scripting, compiling, debugging, qa, auditing, complete, failed"
         string statusMessage "current step description for UI"
         string failureReason "optional"
         dict zworldKvp "input"
@@ -171,6 +171,8 @@ erDiagram
         string proseFeedback "optional"
         string qaFeedback "optional"
         string auditFeedback "optional"
+        string storyEditorFeedback "optional; raw SE rejection, consumed by arbiter"
+        string techEditorFeedback "optional; raw TE rejection when both editors fail"
         int outlineReviewCount
         int proseReviewCount
         int compileFixCount
