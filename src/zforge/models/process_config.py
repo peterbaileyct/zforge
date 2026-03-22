@@ -139,6 +139,12 @@ PROCESSES: list[ProcessSpec] = [
                 default_provider="Google",
                 default_model="gemini-2.5-flash-lite",
             ),
+            NodeSpec(
+                slug="researcher",
+                display="Researcher",
+                default_provider="Google",
+                default_model="gemini-2.5-flash-lite",
+            ),
         ),
     ),
 ]

@@ -36,6 +36,8 @@ class ExperienceGenerationState(TypedDict):
     # Artifacts (set by agent nodes during execution)
     outline: str | None
     research_notes: str | None
+    research_request: str | None
+    research_caller: str | None
     experience_title: str | None
     experience_slug: str | None
     prose_draft: str | None

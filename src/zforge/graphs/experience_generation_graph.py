@@ -1,21 +1,24 @@
 """LangGraph experience generation graph.
 
-Ten-node pipeline per docs/Experience Generation.md:
+Twelve-node pipeline per docs/Experience Generation.md:
 
-1.  outline_author — agentic RAG; produces outline, research notes, title
-2.  outline_reviewer — dual review (Tech Editor + Story Editor); PASS/FAIL
-3.  arbiter_outline — overrules Story Editor when rejection stems from player premise
-4.  prose_writer — agentic RAG; expands outline into prose draft
-5.  prose_reviewer — dual review; PASS/FAIL
-6.  arbiter_prose — same as arbiter_outline but for prose stage
-7.  ink_scripter — translates prose draft into Ink script
-8.  ink_compile_check — non-LLM; invokes IfEngineConnector.build()
-9.  ink_debugger — fixes compiler errors in Ink script
-10. ink_qa — virtual playtest for pathing errors
-11. ink_auditor — final structural audit
+1.  outline_author — produces outline; may emit research_request
+2.  outline_researcher — agentic RAG; fulfils outline research requests
+3.  outline_reviewer — dual review (Tech Editor + Story Editor); PASS/FAIL
+4.  arbiter_outline — overrules Story Editor when rejection stems from player premise
+5.  prose_writer — expands outline into prose; may emit research_request
+6.  prose_researcher — agentic RAG; fulfils prose research requests
+7.  prose_reviewer — dual review; PASS/FAIL
+8.  arbiter_prose — same as arbiter_outline but for prose stage
+9.  ink_scripter — translates prose draft into Ink script
+10. ink_compile_check — non-LLM; invokes IfEngineConnector.build()
+11. ink_debugger — fixes compiler errors in Ink script
+12. ink_qa — virtual playtest for pathing errors
+13. ink_auditor — final structural audit
 
-Tool calls are executed inline within agentic RAG nodes — no ToolNode is
-used (per docs/Processes.md § LangGraph tool call pattern).
+Tool calls are executed inline within researcher nodes — outline_author and
+prose_writer delegate research to dedicated researcher nodes rather than
+running their own tool loops.
 
 Implements: src/zforge/graphs/experience_generation_graph.py per
 docs/Experience Generation.md.
@@ -65,21 +68,26 @@ MAX_SCRIPT_REWRITE_ITERATIONS = 5
 _OUTLINE_AUTHOR_PROMPT = f"""\
 You are a Lead Narrative Designer. Convert world data and player intent into \
 a structural "beat sheet."
-1. Query the Z-World hybrid data store to gather specific keys relevant to \
-the prompt. The valid entity_type values for query_world are: {_ENTITY_TYPES}. \
-Do not query for any other entity type.
-2. Create an Outline: Structured Markdown of scenes and branching points \
-(using === knot_names ===).
-3. Create Research Notes: A bulleted list of factual data retrieved from \
-the Z-World hybrid data store (e.g., location.capital.weather: frozen). \
-Keep these distinct from the outline.
-4. Adhere to the Player Preference scale (1-10).
 
-When you have gathered enough information and are ready to produce output, \
-respond with ONLY a JSON object (no markdown fencing) with exactly these keys:
+If you need additional world data before writing the outline, output ONLY a \
+JSON object with key "research_request" containing your focused question(s) \
+for the research assistant. You may do this as many times as needed; each \
+time you will receive updated Research Notes.
+
+Once you have sufficient context, produce the final output as ONLY a JSON \
+object (no markdown fencing) with exactly these keys:
 - "experience_title": a short, evocative title for this experience
-- "outline": the full structured Markdown outline
-- "research_notes": the bulleted reference data list"""
+- "outline": Structured Markdown of scenes and branching points \
+(using === knot_names ===). The outline should total approximately 5-10% of \
+the target prose word count from player preferences. The number of \
+=== knot === sections must equal the target complexity (knot count) from \
+player preferences exactly. Valid entity_type values for any world queries \
+performed by the researcher are: {_ENTITY_TYPES}.
+- "research_notes": an updated consolidated bulleted list of all factual \
+world data gathered.
+
+Adhere to all player preference scales (1-10): character/plot, \
+narrative/dialog, levity, logical vs. mood, and puzzle complexity."""
 
 _TECH_EDITOR_PROMPT = """\
 You are the Logic Police. Your focus is the internal consistency of the \
@@ -101,8 +109,7 @@ exactly these keys: "status" (either "PASS" or "FAIL") and "feedback" \
 _STORY_EDITOR_PROMPT = f"""\
 You are the Lore Police. Your focus is the external consistency between \
 the draft and the Z-World metadata.
-When using query_world to verify lore, the valid entity_type values are: \
-{_ENTITY_TYPES}. Do not query for any other entity type.
+
 CRITICAL RULE: The player prompt establishes the creative premise of this \
 experience and may intentionally diverge from established world canon \
 (e.g., an alternate-universe scenario where normally hostile factions are \
@@ -111,11 +118,12 @@ itself as a lore violation. Treat it as an accepted given. Your job is to \
 ensure that the Z-World details referenced within the draft \
 (entity names, traits, locations, world mechanics) are accurately \
 represented once the premise is in play.
-1. Lore Adherence: Ensure world facts are used accurately (e.g., if \
-world.tech_level: medieval, flag any mention of steam engines \
-unrelated to the premise).
+
+1. Lore Adherence: Using the Research Notes provided, ensure world facts \
+are used accurately (e.g., if world.tech_level: medieval, flag any mention \
+of steam engines unrelated to the premise).
 2. Fact-Checking: Cross-reference mentions of NPCs, artifacts, or \
-locations against the specific key-value pairs provided.
+locations against the research notes and world metadata provided.
 3. Tone: Ensure the draft matches the "voice" established in the world \
 metadata.
 4. Output: respond with ONLY a JSON object (no markdown fencing) with \
@@ -125,13 +133,35 @@ exactly these keys: "status" (either "PASS" or "FAIL") and "feedback" \
 _PROSE_WRITER_PROMPT = f"""\
 You are a Professional Fiction Author. Expand the Outline into vivid \
 narrative text.
-1. Use Research Notes (derived from the Z-World data store) for sensory \
-details. If you call query_world for additional detail, valid entity_type \
-values are: {_ENTITY_TYPES}. Do not query for any other entity type.
-2. Write dialogue and descriptions. Mark choices with [Choice Text].
-3. Focus on quality of prose while respecting the "World Consistency" notes.
 
-Produce the full prose draft text as your response."""
+If you need additional world data (sensory details, character traits, \
+relationships), output ONLY a JSON object with key "research_request" \
+containing your focused question(s) for the research assistant. You may \
+do this as many times as needed; each time you will receive updated \
+Research Notes. Valid entity_type values for any world queries are: \
+{_ENTITY_TYPES}.
+
+Once you have sufficient context, write the full prose draft as plain text \
+(no JSON wrapper).
+- Target the word count specified in player preferences.
+- Write dialogue and descriptions. Mark choices with [Choice Text].
+- Respect all player preference scales (character/plot, narrative/dialog, \
+levity, logical vs. mood, puzzle complexity) and any editor feedback \
+provided."""
+
+_RESEARCHER_PROMPT = f"""\
+You are a Research Assistant with access to the Z-World hybrid data store.
+
+You have received a research request from a creative agent. Your task is:
+
+1. Use the available retrieval tools to gather all data relevant to the \
+request. The valid entity_type values for query_world are: {_ENTITY_TYPES}. \
+Do not query for any other entity type.
+2. Combine the retrieved data with the existing Research Notes provided, \
+avoiding duplication.
+3. Return ONLY a JSON object (no markdown fencing) with exactly this key: \
+- "research_notes": the updated consolidated bulleted list of factual \
+world data."""
 
 _INK_SCRIPTER_PROMPT = """\
 You are a Narrative Implementation Engineer. Translate the prose draft \
@@ -249,10 +279,13 @@ def _parse_json_response(content: str) -> dict[str, Any] | None:
 
 def _make_outline_author_node(
     llm_connector: LlmConnector,
-    embedding_connector: EmbeddingConnector,
     model_name: str | None = None,
 ):
-    """Agentic RAG node: produces outline, research notes, and experience title."""
+    """Produces outline, research notes, and experience title.
+
+    No longer runs its own tool loop — emits a ``research_request`` when it
+    needs additional world data, which the researcher node fulfils.
+    """
 
     _model_cache: list[Any] = []
 
@@ -262,24 +295,6 @@ def _make_outline_author_node(
             _model_cache.append(llm_connector.get_model(model_name))
         model = _model_cache[0]
 
-        z_bundle_root = state.get("z_bundle_root")
-
-        # Build retriever tools for this Z-Bundle (if a world is provided)
-        tools: list[Any] = []
-        if z_bundle_root is not None:
-            (
-                query_world, retrieve_source, find_relationship,
-                find_relationship_by_name, list_entities, get_neighbors,
-                find_path, get_source_passages,
-            ) = make_world_query_tools(
-                z_bundle_root, ALLOWED_NODES, embedding_connector
-            )
-            tools = [
-                query_world, retrieve_source, find_relationship,
-                find_relationship_by_name, list_entities, get_neighbors,
-                find_path, get_source_passages,
-            ]
-
         # Build messages
         world_context = json.dumps(state.get("zworld_kvp") or {}, indent=2)
         prefs_context = json.dumps(state["preferences"], indent=2)
@@ -288,6 +303,10 @@ def _make_outline_author_node(
             f"\nPlayer preferences:\n{prefs_context}",
             f"\nPlayer request: {state['player_prompt']}",
         ]
+        if state.get("research_notes"):
+            human_parts.append(
+                f"\nResearch Notes (gathered so far):\n{state['research_notes']}"
+            )
         if state.get("outline_feedback"):
             human_parts.append(
                 f"\nThe reviewers rejected your previous outline with this "
@@ -299,40 +318,8 @@ def _make_outline_author_node(
             HumanMessage(content="\n".join(human_parts)),
         ]
 
-        # Agentic RAG loop
-        bound_model = model.bind_tools(tools) if tools else model
-        tool_map = {t.name: t for t in tools}
-        tool_calls_log: list[dict[str, Any]] = []
-
-        while True:
-            response = await bound_model.ainvoke(messages)
-            messages.append(response)
-
-            if not (hasattr(response, "tool_calls") and response.tool_calls):
-                break
-
-            for tc in response.tool_calls:
-                tool_fn = tool_map.get(tc["name"])
-                if tool_fn:
-                    result = await tool_fn.ainvoke(tc["args"])
-                    log.info(
-                        "outline_author: tool %s args=%r returned %d chars",
-                        tc["name"], tc["args"], len(str(result)),
-                    )
-                    tool_calls_log.append({
-                        "type": "tool_call",
-                        "node": "outline_author",
-                        "tool": tc["name"],
-                        "args": tc["args"],
-                    })
-                    messages.append(
-                        ToolMessage(
-                            content=str(result),
-                            tool_call_id=tc["id"],
-                            name=tc["name"],
-                        )
-                    )
-
+        response = await model.ainvoke(messages)
+        messages.append(response)
         content = extract_text_content(getattr(response, "content", ""))
         parsed = _parse_json_response(content)
 
@@ -343,7 +330,23 @@ def _make_outline_author_node(
                 "failure_reason": "Outline author did not produce valid JSON",
                 "status_message": "Experience generation failed: outline output was not valid JSON",
                 "last_step_rationale": None,
-                "action_log": tool_calls_log,
+                "action_log": [],
+                "outline_review_count": 0,
+                "prose_review_count": 0,
+                "compile_fix_count": 0,
+                "script_rewrite_count": 0,
+                "messages": messages,
+            }
+
+        # If the author is requesting research, route to the researcher node
+        if "research_request" in parsed:
+            return {
+                "research_request": parsed["research_request"],
+                "research_caller": "outline_author",
+                "status": "researching_outline",
+                "status_message": "Outliner requesting research...",
+                "last_step_rationale": None,
+                "action_log": [],
                 "outline_review_count": 0,
                 "prose_review_count": 0,
                 "compile_fix_count": 0,
@@ -361,7 +364,7 @@ def _make_outline_author_node(
             "status": "reviewing_outline",
             "status_message": f"Outline '{title}' drafted; under review...",
             "last_step_rationale": None,
-            "action_log": tool_calls_log,
+            "action_log": [],
             "outline_review_count": 0,
             "prose_review_count": 0,
             "compile_fix_count": 0,
@@ -374,7 +377,6 @@ def _make_outline_author_node(
 
 def _make_dual_reviewer_node(
     llm_connector: LlmConnector,
-    embedding_connector: EmbeddingConnector,
     model_name: str | None,
     node_name: str,
     artifact_key: str,
@@ -388,9 +390,8 @@ def _make_dual_reviewer_node(
 ):
     """Factory for dual-review nodes (Tech Editor + Story Editor).
 
-    Used by both outline_reviewer and prose_reviewer.  The Story Editor role
-    has access to ``query_world`` and ``retrieve_source`` tools for lore
-    verification; the Tech Editor does not use retrieval tools.
+    Used by both outline_reviewer and prose_reviewer.  The Story Editor now
+    relies on pre-gathered research_notes rather than its own retrieval tools.
     """
     _model_cache: list[Any] = []
 
@@ -417,65 +418,18 @@ def _make_dual_reviewer_node(
         tech_content = extract_text_content(getattr(tech_response, "content", ""))
         tech_result = _parse_json_response(tech_content) or {"status": "PASS", "feedback": ""}
 
-        # Story Editor review (agentic — with retrieval tools when a world is provided)
-        z_bundle_root = state.get("z_bundle_root")
-        story_tools: list[Any] = []
-        if z_bundle_root is not None:
-            (
-                query_world, retrieve_source, find_relationship,
-                find_relationship_by_name, list_entities, get_neighbors,
-                find_path, get_source_passages,
-            ) = make_world_query_tools(
-                z_bundle_root, ALLOWED_NODES, embedding_connector
-            )
-            story_tools = [
-                query_world, retrieve_source, find_relationship,
-                find_relationship_by_name, list_entities, get_neighbors,
-                find_path, get_source_passages,
-            ]
-        story_tool_map = {t.name: t for t in story_tools}
-        story_bound = model.bind_tools(story_tools) if story_tools else model
-        story_tool_calls_log: list[dict[str, Any]] = []
-
+        # Story Editor review (single call with research_notes — no tool loop)
+        research_notes = state.get("research_notes") or ""
+        story_human_content = (
+            f"World metadata:\n{world_context}\n\n"
+            f"Research Notes:\n{research_notes}\n\n"
+            f"Draft to review:\n{artifact}"
+        )
         story_messages: list[BaseMessage] = [
             SystemMessage(content=_STORY_EDITOR_PROMPT),
-            HumanMessage(content=human_content),
+            HumanMessage(content=story_human_content),
         ]
-
-        # Agentic tool-call loop for Story Editor
-        while True:
-            story_response = await story_bound.ainvoke(story_messages)
-            story_messages.append(story_response)
-
-            if not (hasattr(story_response, "tool_calls") and story_response.tool_calls):
-                break
-
-            for tc in story_response.tool_calls:
-                tool_fn = story_tool_map.get(tc["name"])
-                if tool_fn:
-                    result = await tool_fn.ainvoke(tc["args"])
-                    log.info(
-                        "%s: story editor tool %s args=%r returned %d chars",
-                        node_name,
-                        tc["name"],
-                        tc["args"],
-                        len(str(result)),
-                    )
-                    story_tool_calls_log.append({
-                        "type": "tool_call",
-                        "node": node_name,
-                        "role": "story_editor",
-                        "tool": tc["name"],
-                        "args": tc["args"],
-                    })
-                    story_messages.append(
-                        ToolMessage(
-                            content=str(result),
-                            tool_call_id=tc["id"],
-                            name=tc["name"],
-                        )
-                    )
-
+        story_response = await model.ainvoke(story_messages)
         story_content = extract_text_content(getattr(story_response, "content", ""))
         story_result = _parse_json_response(story_content) or {"status": "PASS", "feedback": ""}
 
@@ -506,7 +460,7 @@ def _make_dual_reviewer_node(
                 "status": pass_status,
                 "status_message": pass_message,
                 "last_step_rationale": rationale,
-                "action_log": story_tool_calls_log,
+                "action_log": [],
             }
 
         tech_fb = tech_result.get("feedback", "")
@@ -540,9 +494,9 @@ def _make_dual_reviewer_node(
                 "story_editor_feedback": story_fb,
                 "tech_editor_feedback": tech_fb if not tech_pass else None,
                 "status": story_rejected_status,
-                "status_message": f"Story Editor rejected — sending to Arbiter...",
+                "status_message": "Story Editor rejected — sending to Arbiter...",
                 "last_step_rationale": rationale,
-                "action_log": story_tool_calls_log,
+                "action_log": [],
             }
 
         # Only Tech Editor failed — normal revision loop, no Arbiter needed.
@@ -556,7 +510,7 @@ def _make_dual_reviewer_node(
             "status": fail_status,
             "status_message": fail_message,
             "last_step_rationale": rationale,
-            "action_log": story_tool_calls_log,
+            "action_log": [],
         }
 
     return reviewer_node
@@ -667,10 +621,13 @@ def _make_arbiter_node(
 
 def _make_prose_writer_node(
     llm_connector: LlmConnector,
-    embedding_connector: EmbeddingConnector,
     model_name: str | None = None,
 ):
-    """Agentic RAG node: expands outline into vivid prose draft."""
+    """Expands outline into vivid prose draft.
+
+    No longer runs its own tool loop — emits a ``research_request`` when it
+    needs additional world data, which the researcher node fulfils.
+    """
 
     _model_cache: list[Any] = []
 
@@ -680,8 +637,79 @@ def _make_prose_writer_node(
             _model_cache.append(llm_connector.get_model(model_name))
         model = _model_cache[0]
 
-        z_bundle_root = state.get("z_bundle_root")
+        prefs_context = json.dumps(state["preferences"], indent=2)
+        human_parts = [
+            f"Outline:\n{state.get('outline', '')}",
+            f"\nResearch Notes:\n{state.get('research_notes', '')}",
+            f"\nPlayer preferences:\n{prefs_context}",
+        ]
+        if state.get("prose_feedback"):
+            human_parts.append(
+                f"\nThe reviewers rejected your previous draft with this "
+                f"feedback. Revise accordingly:\n{state['prose_feedback']}"
+            )
 
+        messages: list[BaseMessage] = [
+            SystemMessage(content=_PROSE_WRITER_PROMPT),
+            HumanMessage(content="\n".join(human_parts)),
+        ]
+
+        response = await model.ainvoke(messages)
+        messages.append(response)
+        content = extract_text_content(getattr(response, "content", ""))
+
+        # Check if the writer is requesting research
+        parsed = _parse_json_response(content)
+        if parsed and "research_request" in parsed:
+            return {
+                "research_request": parsed["research_request"],
+                "research_caller": "prose_writer",
+                "status": "researching_prose",
+                "status_message": "Writer requesting research...",
+                "last_step_rationale": None,
+                "action_log": [],
+                "outline_review_count": 0,
+                "prose_review_count": 0,
+                "compile_fix_count": 0,
+                "script_rewrite_count": 0,
+                "messages": messages,
+            }
+
+        # Otherwise the response is the prose draft (plain text)
+        return {
+            "prose_draft": content,
+            "prose_feedback": None,
+            "status": "reviewing_prose",
+            "status_message": "Prose draft written; under review...",
+            "last_step_rationale": None,
+            "action_log": [],
+            "outline_review_count": 0,
+            "prose_review_count": 0,
+            "compile_fix_count": 0,
+            "script_rewrite_count": 0,
+            "messages": messages,
+        }
+
+    return prose_writer_node
+
+
+def _make_researcher_node(
+    llm_connector: LlmConnector,
+    embedding_connector: EmbeddingConnector,
+    node_name: str,
+    model_name: str | None = None,
+):
+    """Agentic RAG node: fulfils a research_request and updates research_notes."""
+
+    _model_cache: list[Any] = []
+
+    @log_node(node_name)
+    async def researcher_node(state: ExperienceGenerationState) -> dict[str, Any]:
+        if not _model_cache:
+            _model_cache.append(llm_connector.get_model(model_name))
+        model = _model_cache[0]
+
+        z_bundle_root = state.get("z_bundle_root")
         tools: list[Any] = []
         if z_bundle_root is not None:
             (
@@ -697,19 +725,17 @@ def _make_prose_writer_node(
                 find_path, get_source_passages,
             ]
 
-        human_parts = [
-            f"Outline:\n{state.get('outline', '')}",
-            f"\nResearch Notes:\n{state.get('research_notes', '')}",
-        ]
-        if state.get("prose_feedback"):
-            human_parts.append(
-                f"\nThe reviewers rejected your previous draft with this "
-                f"feedback. Revise accordingly:\n{state['prose_feedback']}"
-            )
+        request = state.get("research_request") or ""
+        existing_notes = state.get("research_notes") or ""
 
         messages: list[BaseMessage] = [
-            SystemMessage(content=_PROSE_WRITER_PROMPT),
-            HumanMessage(content="\n".join(human_parts)),
+            SystemMessage(content=_RESEARCHER_PROMPT),
+            HumanMessage(
+                content=(
+                    f"Existing Research Notes:\n{existing_notes}\n\n"
+                    f"Research Request:\n{request}"
+                )
+            ),
         ]
 
         bound_model = model.bind_tools(tools) if tools else model
@@ -728,12 +754,16 @@ def _make_prose_writer_node(
                 if tool_fn:
                     result = await tool_fn.ainvoke(tc["args"])
                     log.info(
-                        "prose_writer: tool %s args=%r returned %d chars",
-                        tc["name"], tc["args"], len(str(result)),
+                        "%s: tool %s args=%r returned %d chars",
+                        node_name,
+                        tc["name"],
+                        tc["args"],
+                        len(str(result)),
                     )
                     tool_calls_log.append({
                         "type": "tool_call",
-                        "node": "prose_writer",
+                        "node": node_name,
+                        "role": "researcher",
                         "tool": tc["name"],
                         "args": tc["args"],
                     })
@@ -746,22 +776,21 @@ def _make_prose_writer_node(
                     )
 
         content = extract_text_content(getattr(response, "content", ""))
+        parsed = _parse_json_response(content)
+        updated_notes = (parsed or {}).get("research_notes", existing_notes)
 
         return {
-            "prose_draft": content,
-            "prose_feedback": None,
-            "status": "reviewing_prose",
-            "status_message": "Prose draft written; under review...",
-            "last_step_rationale": None,
+            "research_notes": updated_notes,
+            "research_request": None,
+            "research_caller": None,
             "action_log": tool_calls_log,
             "outline_review_count": 0,
             "prose_review_count": 0,
             "compile_fix_count": 0,
             "script_rewrite_count": 0,
-            "messages": messages,
         }
 
-    return prose_writer_node
+    return researcher_node
 
 
 def _make_ink_scripter_node(
@@ -1026,6 +1055,32 @@ def _make_ink_auditor_node(
 # ---------------------------------------------------------------------------
 
 
+def _route_after_outline_author(state: ExperienceGenerationState) -> str:
+    """Route after outline_author: research_request → outline_researcher, fail → end, else → reviewer."""
+    if state.get("research_request"):
+        return "outline_researcher"
+    if state.get("status") == "failed":
+        return "end"
+    return "outline_reviewer"
+
+
+def _route_after_outline_researcher(state: ExperienceGenerationState) -> str:
+    """Route after outline_researcher: always returns to outline_author."""
+    return "outline_author"
+
+
+def _route_after_prose_writer(state: ExperienceGenerationState) -> str:
+    """Route after prose_writer: research_request → prose_researcher, else → reviewer."""
+    if state.get("research_request"):
+        return "prose_researcher"
+    return "prose_reviewer"
+
+
+def _route_after_prose_researcher(state: ExperienceGenerationState) -> str:
+    """Route after prose_researcher: always returns to prose_writer."""
+    return "prose_writer"
+
+
 def _route_after_outline_review(state: ExperienceGenerationState) -> str:
     """Route after outline_reviewer: PASS → prose_writer, Story Editor FAIL → arbiter_outline, Tech Only FAIL → loop or fail."""
     status = state.get("status", "")
@@ -1157,6 +1212,7 @@ def build_experience_generation_graph(
     ink_debugger_connector: LlmConnector,
     ink_qa_connector: LlmConnector,
     ink_auditor_connector: LlmConnector,
+    researcher_connector: LlmConnector,
     embedding_connector: EmbeddingConnector,
     if_engine_connector: IfEngineConnector,
     outline_author_model: str | None = None,
@@ -1169,6 +1225,7 @@ def build_experience_generation_graph(
     ink_debugger_model: str | None = None,
     ink_qa_model: str | None = None,
     ink_auditor_model: str | None = None,
+    researcher_model: str | None = None,
 ):
     """Build and compile the experience generation LangGraph StateGraph.
 
@@ -1189,14 +1246,19 @@ def build_experience_generation_graph(
     graph.add_node(
         "outline_author",
         _make_outline_author_node(
-            outline_author_connector, embedding_connector, outline_author_model
+            outline_author_connector, outline_author_model
+        ),
+    )
+    graph.add_node(
+        "outline_researcher",
+        _make_researcher_node(
+            researcher_connector, embedding_connector, "outline_researcher", researcher_model
         ),
     )
     graph.add_node(
         "outline_reviewer",
         _make_dual_reviewer_node(
             outline_reviewer_connector,
-            embedding_connector,
             outline_reviewer_model,
             node_name="outline_reviewer",
             artifact_key="outline",
@@ -1226,14 +1288,19 @@ def build_experience_generation_graph(
     graph.add_node(
         "prose_writer",
         _make_prose_writer_node(
-            prose_writer_connector, embedding_connector, prose_writer_model
+            prose_writer_connector, prose_writer_model
+        ),
+    )
+    graph.add_node(
+        "prose_researcher",
+        _make_researcher_node(
+            researcher_connector, embedding_connector, "prose_researcher", researcher_model
         ),
     )
     graph.add_node(
         "prose_reviewer",
         _make_dual_reviewer_node(
             prose_reviewer_connector,
-            embedding_connector,
             prose_reviewer_model,
             node_name="prose_reviewer",
             artifact_key="prose_draft",
@@ -1283,7 +1350,22 @@ def build_experience_generation_graph(
 
     # --- Edges ---
     graph.set_entry_point("outline_author")
-    graph.add_edge("outline_author", "outline_reviewer")
+    graph.add_conditional_edges(
+        "outline_author",
+        _route_after_outline_author,
+        {
+            "outline_researcher": "outline_researcher",
+            "outline_reviewer": "outline_reviewer",
+            "end": END,
+        },
+    )
+    graph.add_conditional_edges(
+        "outline_researcher",
+        _route_after_outline_researcher,
+        {
+            "outline_author": "outline_author",
+        },
+    )
     graph.add_conditional_edges(
         "outline_reviewer",
         _route_after_outline_review,
@@ -1303,7 +1385,21 @@ def build_experience_generation_graph(
             "end": END,
         },
     )
-    graph.add_edge("prose_writer", "prose_reviewer")
+    graph.add_conditional_edges(
+        "prose_writer",
+        _route_after_prose_writer,
+        {
+            "prose_researcher": "prose_researcher",
+            "prose_reviewer": "prose_reviewer",
+        },
+    )
+    graph.add_conditional_edges(
+        "prose_researcher",
+        _route_after_prose_researcher,
+        {
+            "prose_writer": "prose_writer",
+        },
+    )
     graph.add_conditional_edges(
         "prose_reviewer",
         _route_after_prose_review,

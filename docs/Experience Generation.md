@@ -20,6 +20,7 @@ flowchart TD
         A2[Technical Editor]
         A3[Story Editor]
         A4[Staff Writer]
+        A4r[Researcher]
         A5[Junior Scripter]
         A6[Senior Scripter]
         A7[QA Analyst]
@@ -41,14 +42,18 @@ flowchart TD
     Node_Outline[outline_author]
     A1 -.-> Node_Outline
     S1 & S2 --> Node_Outline
-    T1_qw & T1_rs --- Node_Outline
-    Node_Outline --> S3
-    Node_Outline --> S3a
+    S3a --> Node_Outline
+    Node_Outline -- "Research Needed" --> Node_Outline_Res[outline_researcher]
+    A4r -.-> Node_Outline_Res
+    T1_qw & T1_rs --- Node_Outline_Res
+    Node_Outline_Res --> S3a
+    Node_Outline_Res --> Node_Outline
+    Node_Outline -- "Outline Ready" --> S3
+    Node_Outline -- "Outline Ready" --> S3a
 
     Node_Review_Outline{outline_reviewer}
     A2 & A3 -.-> Node_Review_Outline
-    S3 & S1 --> Node_Review_Outline
-    T1_qw & T1_rs --- Node_Review_Outline
+    S3 & S1 & S3a --> Node_Review_Outline
 
     Node_Review_Outline -- "Logic Error (Tech Only)" --> Node_Outline
     Node_Review_Outline -- "Story Editor Rejected" --> Node_Arbiter_Outline{arbiter_outline}
@@ -61,13 +66,16 @@ flowchart TD
     Node_Prose[prose_writer]
     A4 -.-> Node_Prose
     S3 & S3a --> Node_Prose
-    T1_qw & T1_rs --- Node_Prose
-    Node_Prose --> S4
+    Node_Prose -- "Research Needed" --> Node_Prose_Res[prose_researcher]
+    A4r -.-> Node_Prose_Res
+    T1_qw & T1_rs --- Node_Prose_Res
+    Node_Prose_Res --> S3a
+    Node_Prose_Res --> Node_Prose
+    Node_Prose -- "Draft Ready" --> S4
 
     Node_Review_Prose{prose_reviewer}
     A2 & A3 -.-> Node_Review_Prose
-    S4 & S1 --> Node_Review_Prose
-    T1_qw & T1_rs --- Node_Review_Prose
+    S4 & S1 & S3a --> Node_Review_Prose
 
     Node_Review_Prose -- "Tone/Lore/Logic Fix" --> Node_Prose
     Node_Review_Prose -- "Story Editor Rejected" --> Node_Arbiter_Prose{arbiter_prose}
@@ -107,7 +115,9 @@ flowchart TD
 
     %% Styling
     style Node_Outline fill:#f9f,stroke:#333
+    style Node_Outline_Res fill:#f9f,stroke:#333,stroke-dasharray:5 5
     style Node_Prose fill:#bbf,stroke:#333
+    style Node_Prose_Res fill:#bbf,stroke:#333,stroke-dasharray:5 5
     style Node_Script fill:#dfd,stroke:#333
 ```
 
@@ -125,14 +135,23 @@ The following are provided as inputs to the graph at entry:
 > **Note:** LLM prompts for each agent role are forthcoming and will be added here before implementation.
 
 * **Outliner (Narrative Designer)** — node: `outline_author`, default: `Google` / `gemini-2.5-flash`
-    * Generates the structural beat sheet and extracts factual reference data from the Z-World hybrid data store. Also defines the **experience title**, which is stored in state; the graph derives a kebab-case slug from this title (e.g. `"The Heist at Ironhaven"` → `the-heist-at-ironhaven`) for use in output file naming. Has access to `query_world` and `retrieve_source` tools (see [Retrieval Patterns](RAG%20and%20GRAG%20Implementation.md#retrieval-patterns)).
+    * Generates the structural beat sheet. Does **not** have direct access to retrieval tools; instead, it may issue a **research request** (see Researcher below) to gather world data before finalising the outline. Also defines the **experience title**, which is stored in state; the graph derives a kebab-case slug from this title (e.g. `"The Heist at Ironhaven"` → `the-heist-at-ironhaven`) for use in output file naming.
         * Prompt:
         ```
         You are a Lead Narrative Designer. Convert world data and player intent into a structural "beat sheet."
-        1.	Query the Z-World hybrid data store using query_world to gather entities and relationships relevant to the prompt.
-        2.	Create Outline (S3): Structured Markdown of scenes and branching points (using === knot_names ===).
-        3.	Create Research Notes (S3a): A bulleted list of factual data retrieved from the Z-World store (e.g., location name, notable traits, key relationships). Keep these distinct from the outline.
-        4.	Adhere to the Player Preference scale (1-10).        
+        If you need additional world data before writing the outline, output ONLY a JSON object with key
+        "research_request" containing your focused question(s) for the research assistant. You may do this
+        as many times as needed; each time you will receive updated Research Notes.
+        Once you have sufficient context, produce the final output as ONLY a JSON object with these keys:
+        - "experience_title": a short, evocative title for this experience
+        - "outline": Structured Markdown of scenes and branching points (using === knot_names ===). The
+          outline should total approximately 5-10% of the target prose word count from player preferences.
+          The number of === knot === sections must equal the target complexity (knot count) from player
+          preferences exactly.
+        - "research_notes": an updated consolidated bulleted list of all factual world data gathered.
+        Adhere to all player preference scales (1-10): character/plot, narrative/dialog, levity, logical
+        vs. mood, and puzzle complexity.
+        ```
 * **Technical Editor (Internal Consistency)** — nodes: `outline_reviewer`, `prose_reviewer`, default: `Anthropic` / `claude-haiku-4-5`
     * Acts as the "Logic Police." Monitors internal plot consistency, pacing, and ensuring branching choices have actual narrative value. Does not use retrieval tools (structural review only). **The player prompt's premise is accepted as given — do not penalise relationships or scenarios that follow directly from it.**
         * Prompt:
@@ -144,23 +163,40 @@ The following are provided as inputs to the graph at entry:
         3.	Pacing: Check if the sequence of events feels earned.
         4.	Output: {"status": "PASS/FAIL", "feedback": "Notes on plot logic"}.
 * **Story Editor (World Consistency)** — nodes: `outline_reviewer`, `prose_reviewer`, default: `Anthropic` / `claude-haiku-4-5`
-    * Acts as the "Lore Police." Enforces external consistency by cross-referencing all content against the Z-World store. Has access to `query_world` and `retrieve_source` tools to verify entity traits, relationships, and verbatim lore details. **The player prompt's premise is accepted as given — an AU or crossover scenario that diverges from canon is not itself a violation.**
+    * Acts as the "Lore Police." Enforces external consistency by cross-referencing all content against the Research Notes (S3a) and Z-World metadata provided in state. Does **not** have direct access to retrieval tools — fact-checking is performed against the research notes accumulated by the Researcher. **The player prompt's premise is accepted as given — an AU or crossover scenario that diverges from canon is not itself a violation.**
         * Prompt:
         ```
-        You are the Lore Police. Your focus is the external consistency between the draft and the Z-World KV Store (S1).
+        You are the Lore Police. Your focus is the external consistency between the draft and the Z-World metadata.
         CRITICAL RULE: The player prompt establishes the creative premise of this experience and may intentionally diverge from established world canon (e.g., an alternate-universe scenario where normally hostile factions are friendly, or a playful crossover). Do NOT flag the player's stated premise itself as a lore violation. Treat it as an accepted given. Your job is to ensure that the Z-World details referenced within the draft (entity names, traits, locations, world mechanics) are accurately represented once the premise is in play.
-        1.	Lore Adherence: Ensure world facts are used accurately (e.g., if world.tech_level: medieval, flag any mention of steam engines unrelated to the premise).
-        2.	Fact-Checking: Cross-reference mentions of NPCs, artifacts, or locations against the specific key-value pairs provided.
+        1.	Lore Adherence: Using the Research Notes provided, ensure world facts are used accurately.
+        2.	Fact-Checking: Cross-reference mentions of NPCs, artifacts, or locations against the research notes and world metadata provided.
         3.	Tone: Ensure the draft matches the "voice" established in the world metadata.
         4.	Output: {"status": "PASS/FAIL", "feedback": "Notes on Z-World violations"}.
 * **Staff Writer (Author)** — node: `prose_writer`, default: `Anthropic` / `claude-sonnet-4-5`
-    * High-fidelity creative writing. Expands the approved outline into vivid prose and dialogue while adhering to the editors' stylistic and lore-based feedback. Has access to `query_world` and `retrieve_source` tools for on-demand character detail, sensory description, and verbatim lore.
+    * High-fidelity creative writing. Expands the approved outline into vivid prose and dialogue. Does **not** have direct access to retrieval tools; instead, it may issue a **research request** (see Researcher below) to fetch additional detail before writing or mid-draft.
         * Prompt:
-        ``` 
-        You are a Professional Fiction Author. Expand the Outline (S3) into vivid narrative text.
-        1.	Use Research Notes (S3a) and query_world to retrieve additional sensory details, character traits, and relationships as needed.
-        2.	Write dialogue and descriptions. Mark choices with [Choice Text].
-        3.	Focus on quality of prose while respecting the "World Consistency" notes.
+        ```
+        You are a Professional Fiction Author. Expand the Outline into vivid narrative text.
+        If you need additional world data (sensory details, character traits, relationships), output ONLY a
+        JSON object with key "research_request" containing your focused question(s) for the research
+        assistant. You may do this as many times as needed; each time you will receive updated Research Notes.
+        Once you have sufficient context, write the full prose draft as plain text (no JSON wrapper).
+        - Target the word count specified in player preferences.
+        - Write dialogue and descriptions. Mark choices with [Choice Text].
+        - Respect all player preference scales (character/plot, narrative/dialog, levity, logical vs. mood,
+          puzzle complexity) and any editor feedback provided.
+        ```
+* **Researcher** — nodes: `outline_researcher`, `prose_researcher`, default: `Google` / `gemini-2.5-flash-lite`
+    * Data retrieval specialist. Activated when `outline_author` or `prose_writer` emits a `research_request`. Both researcher nodes share a single LLM configuration entry with slug `researcher` (configurable in the LLM config UI). Has full access to `query_world`, `retrieve_source`, `find_relationship`, `find_relationship_by_name`, `list_entities`, `get_neighbors`, `find_path`, and `get_source_passages` tools (see [Retrieval Patterns](RAG%20and%20GRAG%20Implementation.md#retrieval-patterns)). After retrieving relevant data, combines results with any existing Research Notes and returns the consolidated notes to the calling node.
+        * Prompt:
+        ```
+        You are a Research Assistant with access to the Z-World hybrid data store.
+        You have received a research request from a creative agent. Your task is:
+        1. Use the available retrieval tools to gather all data relevant to the request.
+        2. Combine the retrieved data with the existing Research Notes provided below, avoiding duplication.
+        3. Return ONLY a JSON object with exactly this key:
+           - "research_notes": the updated consolidated bulleted list of factual world data.
+        ```
 * **Junior Scripter (Implementation)** — node: `ink_scripter`, default: `Google` / `gemini-2.5-flash`
     * Technical implementation. Translates prose drafts into valid Ink syntax, mapping narrative choices to state variables and diverts.
         * Prompt:
@@ -216,7 +252,15 @@ where `world_slug` is the input world slug, and `experience_slug` is the kebab-c
 ## Implementation
 
 - **Process slug:** `experience_generation`
-- **LLM nodes:** `outline_author`, `outline_reviewer`, `arbiter_outline`, `prose_writer`, `prose_reviewer`, `arbiter_prose`, `ink_scripter`, `ink_debugger`, `ink_qa`, `ink_auditor`
+- **LLM nodes:** `outline_author`, `outline_researcher`, `outline_reviewer`, `arbiter_outline`, `prose_writer`, `prose_researcher`, `prose_reviewer`, `arbiter_prose`, `ink_scripter`, `ink_debugger`, `ink_qa`, `ink_auditor`
+
+### Research State Fields
+
+Two fields in `ExperienceGenerationState` support the researcher node pattern:
+
+- **`research_request: str | None`** — Set by `outline_author` or `prose_writer` when they need additional world data. The presence of this field routes execution to the appropriate researcher node (`outline_researcher` or `prose_researcher`). Cleared to `None` by the researcher after fulfilling the request.
+
+- **`research_caller: str | None`** — Set alongside `research_request` to identify which node issued the request (`"outline_author"` or `"prose_writer"`). Used by the researcher's routing logic to return control to the correct node. Cleared to `None` by the researcher.
 
 ### Observability State Fields
 
@@ -224,7 +268,7 @@ Two additional fields in `ExperienceGenerationState` drive live UI feedback duri
 
 - **`last_step_rationale: str | None`** — Set by each review/QA/audit/arbiter node (`outline_reviewer`, `arbiter_outline`, `prose_reviewer`, `arbiter_prose`, `ink_qa`, `ink_auditor`) to a 1–2 sentence summary of the decision. Displayed in the UI below the status label and appended to the action log.
 
-- **`action_log: list[dict[str, Any]]`** — Set by agentic RAG nodes (`outline_author`, `prose_writer`, and the Story Editor sub-loop inside reviewer nodes) to record each tool call made during that node's execution. Entries have `type: "tool_call"` and carry `node`, `role`, `tool`, and `args` keys. The `run_process` runner fires `on_rationale_update` for each entry immediately when the node completes. These appear in the UI action log as `> [role] tool_name(arg_preview)` lines so it is visible which world-store queries the reviewers relied on.
+- **`action_log: list[dict[str, Any]]`** — Set by researcher nodes (`outline_researcher`, `prose_researcher`) to record each tool call made. Entries have `type: "tool_call"` and carry `node`, `role`, `tool`, and `args` keys. The `run_process` runner fires `on_rationale_update` for each entry immediately when the node completes. These appear in the UI action log as `> [role] tool_name(arg_preview)` lines so it is visible which world-store queries were made during research.
 
 - **`story_editor_feedback: str | None`** — Set by `outline_reviewer`/`prose_reviewer` when the Story Editor fails; consumed by `arbiter_outline`/`arbiter_prose`. Cleared to `None` by the arbiter after use.
 

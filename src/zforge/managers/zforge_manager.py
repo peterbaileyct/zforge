@@ -426,6 +426,7 @@ class ZForgeManager:
                 "prose_writer", "prose_reviewer", "arbiter_prose",
                 "ink_scripter", "ink_debugger",
                 "ink_qa", "ink_auditor",
+                "researcher",
             ]
             connectors: dict[str, tuple[LlmConnector, str | None]] = {}
             for ns in node_slugs:
@@ -453,6 +454,8 @@ class ZForgeManager:
                 ink_qa_model=connectors["ink_qa"][1],
                 ink_auditor_connector=connectors["ink_auditor"][0],
                 ink_auditor_model=connectors["ink_auditor"][1],
+                researcher_connector=connectors["researcher"][0],
+                researcher_model=connectors["researcher"][1],
                 embedding_connector=self._embedding_connector,
                 if_engine_connector=self._if_engine_connector,
             )
@@ -465,6 +468,8 @@ class ZForgeManager:
             "player_prompt": player_prompt,
             "outline": None,
             "research_notes": None,
+            "research_request": None,
+            "research_caller": None,
             "experience_title": None,
             "experience_slug": None,
             "prose_draft": None,

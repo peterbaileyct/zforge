@@ -21,11 +21,11 @@ log = logging.getLogger(__name__)
 _KEYRING_SERVICE = "zforge"
 _KEYRING_KEY = "llm.anthropic.api_key"
 
-_DEFAULT_MODEL = "claude-sonnet-4-20250514"
+_DEFAULT_MODEL = "claude-sonnet-4-6"
 _KNOWN_MODELS = [
-    "claude-sonnet-4-20250514",
-    "claude-haiku-4-20250414",
-    "claude-opus-4-20250514",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5-20251001",
+    "claude-opus-4-6",
 ]
 
 
