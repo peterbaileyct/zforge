@@ -9,6 +9,7 @@ docs/User Experience.md and docs/Managers, Processes, and MCP Server.md.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Callable
@@ -34,19 +35,43 @@ class ExperienceManager:
     ) -> None:
         self._on_created.append(callback)
 
+    ZFORGE_VERSION = "0.1"
+
     def create(
         self,
         zworld_id: str,
         name: str,
         compiled_data: bytes,
         suppress_event: bool = False,
+        title: str | None = None,
+        research_notes: str | None = None,
+        outline: str | None = None,
+        prose: str | None = None,
+        player_preferences: dict[str, object] | None = None,
     ) -> Experience:
-        """Save a compiled experience. Optionally suppress the created event."""
+        """Save a compiled experience wrapped in the zforge JSON envelope.
+
+        The file format is a JSON object with keys: zforgeVersion, title, slug,
+        researchNotes, outline, prose, playerPreferences, and inkJson (the
+        native ink compiled JSON).  player_preferences should be the override
+        dict only — pass None when the user did not supply an explicit override.
+        """
         ext = self._if_engine.get_file_extension()
         world_dir = self._folder / zworld_id
         os.makedirs(world_dir, exist_ok=True)
         file_path = world_dir / f"{name}{ext}"
-        file_path.write_bytes(compiled_data)
+        ink_json_str = compiled_data.decode("utf-8")
+        wrapper = {
+            "zforgeVersion": self.ZFORGE_VERSION,
+            "title": title,
+            "slug": name,
+            "researchNotes": research_notes,
+            "outline": outline,
+            "prose": prose,
+            "playerPreferences": player_preferences,
+            "inkJson": ink_json_str,
+        }
+        file_path.write_bytes(json.dumps(wrapper).encode("utf-8"))
 
         experience = Experience(
             zworld_id=zworld_id,
@@ -90,12 +115,24 @@ class ExperienceManager:
         return experiences
 
     def load_experience(self, zworld_id: str, name: str) -> bytes | None:
-        """Load compiled experience data by world id and name."""
+        """Load compiled experience data by world id and name.
+
+        Detects the zforge wrapper format (presence of ``zforgeVersion`` key)
+        and returns only the raw ink JSON bytes.  Legacy files that contain
+        raw ink JSON are returned as-is.
+        """
         ext = self._if_engine.get_file_extension()
         path = self._folder / zworld_id / f"{name}{ext}"
-        if path.exists():
-            return path.read_bytes()
-        return None
+        if not path.exists():
+            return None
+        raw = path.read_bytes()
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict) and "zforgeVersion" in data:
+                return data["inkJson"].encode("utf-8")
+        except (json.JSONDecodeError, KeyError, AttributeError):
+            pass
+        return raw
 
     def save_progress(
         self, zworld_id: str, name: str, state_bytes: bytes

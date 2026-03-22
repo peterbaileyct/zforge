@@ -43,9 +43,10 @@ The gameplay interface interacts with the [IF Engine Abstraction Layer](IF%20Eng
 #### Starting an Experience
 When the user selects an experience to play:
 1. The `ExperienceManager` loads the compiled experience file (e.g., `.ink.json`)
-2. Calls `IfEngineConnector.start_experience(compiled_data)`
-3. The returned opening text is displayed in the output area
-4. Available choices (if any) are displayed as numbered options or tappable buttons below the output
+2. If the file contains a `zforgeVersion` key it is a zforge wrapper (see [Experience File Format](#experience-file-format) below); the raw ink JSON is extracted from the `inkJson` field.  Legacy files without this key are loaded directly.
+3. Calls `IfEngineConnector.start_experience(compiled_data)` with the raw ink JSON bytes
+4. The returned opening text is displayed in the output area
+5. Available choices (if any) are displayed as numbered options or tappable buttons below the output
 
 #### Player Input (Choice-Based)
 For choice-based engines like ink:
@@ -124,6 +125,42 @@ sequenceDiagram
         UI-->>U: Display restored position and choices
     end
 ```
+
+## Experience File Format
+
+Compiled experiences are stored on disk as `.ink.json` files.  New files produced by Z-Forge use a **zforge wrapper** JSON object.  Files produced by earlier builds, or exported directly from another tool, may be raw ink compiled JSON.
+
+### zforge Wrapper Schema
+
+| Key | Type | Description |
+|---|---|---|
+| `zforgeVersion` | string | Format version; currently `"0.1"`. Presence of this key identifies a zforge wrapper. |
+| `title` | string \| null | Human-readable experience title from the generation run. |
+| `slug` | string | URL-safe identifier, used as the filename stem. |
+| `researchNotes` | string \| null | Raw research notes artifact from the generation graph. |
+| `outline` | string \| null | Structured outline artifact from the generation graph. |
+| `prose` | string \| null | Prose draft artifact from the generation graph. |
+| `playerPreferences` | object \| null | Player preferences override used for this generation run. `null` when no explicit override was supplied (base config preferences were used). Keys match `PlayerPreferences.to_dict()`. |
+| `inkJson` | string | The native ink compiled JSON produced by `story.ToJson()`. |
+
+### Format Detection
+
+`ExperienceManager.load_experience()` parses the file as JSON and checks for the `zforgeVersion` key:
+- **Present** → zforge wrapper; return `inkJson` field as UTF-8 bytes.
+- **Absent** → legacy raw ink JSON; return file bytes unchanged.
+
+`IfEngineConnector.start_experience()` always receives raw ink JSON bytes regardless of the on-disk format.
+
+### Implementation
+
+Format detection and wrapping are implemented in `ExperienceManager.create()` and `ExperienceManager.load_experience()` in [src/zforge/managers/experience_manager.py](../src/zforge/managers/experience_manager.py).  The version constant `ZFORGE_VERSION = "0.1"` is defined as a class attribute on `ExperienceManager`.
+
+Wrapper fields are populated from `ExperienceGenerationState` artifacts in `ZForgeManager.start_experience_generation()` ([src/zforge/managers/zforge_manager.py](../src/zforge/managers/zforge_manager.py)):
+- `title` ← `experience_title`
+- `researchNotes` ← `research_notes`
+- `outline` ← `outline`
+- `prose` ← `prose_draft`
+- `playerPreferences` ← `player_preferences.to_dict()` when an explicit override was passed in; `null` otherwise (base config preferences were used and are not recorded)
 
 ## Pre-Gameplay interface
 If no experience is in progress:

@@ -517,7 +517,14 @@ class ZForgeManager:
                 # Use world_slug or "world-free" as the folder key
                 folder_slug = world_slug or "world-free"
                 experience = self.experience_manager.create(
-                    folder_slug, exp_slug, compiled
+                    folder_slug,
+                    exp_slug,
+                    compiled,
+                    title=result.get("experience_title"),
+                    research_notes=result.get("research_notes"),
+                    outline=result.get("outline"),
+                    prose=result.get("prose_draft"),
+                    player_preferences=player_preferences.to_dict() if player_preferences is not None else None,
                 )
                 log.info(
                     "start_experience_generation: saved experience slug=%r",
