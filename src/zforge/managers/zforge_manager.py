@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 log = logging.getLogger(__name__)
@@ -503,6 +505,11 @@ class ZForgeManager:
         )
         log.info("start_experience_generation: run_process returned status=%r", result.get("status"))
 
+        if self._config.debug_experience_artifacts:
+            exp_slug = result.get("experience_slug") or "unknown"
+            debug_base = Path(self._config.experience_folder).parent / "experiences-generation"
+            self._write_debug_artifacts(result, debug_base / exp_slug / "debug")
+
         if result.get("status") == "complete":
             compiled = result.get("compiled_output")
             exp_slug = result.get("experience_slug", "untitled")
@@ -523,6 +530,36 @@ class ZForgeManager:
             result.get("failure_reason"),
         )
         return None
+
+    def _write_debug_artifacts(
+        self, state: dict[str, Any], debug_dir: Path
+    ) -> None:
+        """Write experience generation state artifacts to *debug_dir* as .txt files.
+
+        Called after run_process() when debug_experience_artifacts is enabled.
+        Creates the directory if it does not exist. Non-fatal — logs on error.
+        """
+        _ARTIFACTS: list[tuple[str, str | None]] = [
+            ("research_notes.txt", state.get("research_notes")),
+            ("outline.txt", state.get("outline")),
+            ("prose_draft.txt", state.get("prose_draft")),
+            ("ink_script.txt", state.get("ink_script")),
+            ("outline_feedback.txt", state.get("outline_feedback")),
+            ("prose_feedback.txt", state.get("prose_feedback")),
+            ("qa_feedback.txt", state.get("qa_feedback")),
+            ("audit_feedback.txt", state.get("audit_feedback")),
+        ]
+        errors: list[str] = state.get("compiler_errors") or []
+        _ARTIFACTS.append(("compiler_errors.txt", "\n".join(errors) if errors else None))
+
+        try:
+            os.makedirs(debug_dir, exist_ok=True)
+            for filename, content in _ARTIFACTS:
+                if content:
+                    (debug_dir / filename).write_text(content, encoding="utf-8")
+            log.info("_write_debug_artifacts: artifacts written to %s", debug_dir)
+        except Exception:
+            log.exception("_write_debug_artifacts: failed to write artifacts to %s", debug_dir)
 
     async def ask_about_world(self, slug: str, question: str) -> str:
         """Answer a question about a world using agentic RAG.

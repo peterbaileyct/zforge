@@ -14,6 +14,15 @@ Chunk-splitting parameters for the [Parsing Documents to Z-Bundles](Parsing%20Do
 
 All four parameters are configurable via the **Parsing Pipeline** section of the LLM Configuration screen; overlaps are displayed and entered as a percentage of the respective chunk size and converted to an absolute character count on save. When `parsing_retrieval_chunk_size ≥ parsing_chunk_size`, the retrieval re-split is skipped and the pipeline runs single-pass.
 
+## Experience Generation Debugging
+
+Two settings in `ZForgeConfig` control debug artifact output from the [Experience Generation](Experience%20Generation.md) process:
+
+- **`debug_experience_artifacts: bool`** (default `False`) — when enabled, all intermediate state artifacts (research notes, outline, prose draft, Ink script, feedback strings, compiler errors) are written to `.txt` files under `experiences-generation/{experience_slug}/debug/` at the end of each run (whether or not it succeeded).
+- **`debug_artifact_retention_days: int`** (default `30`) — on every app startup, subdirectories in `experiences-generation/` whose modification time is older than this many days are deleted automatically.
+
+Both settings are exposed in the **Experience Generation Debugging** section of the LLM Configuration screen.
+
 ## Implementation
 Nearly all application preferences are persisted as JSON in `zforge_config.json` located in `platformdirs.user_config_dir("zforge")` (see `ConfigService`). Values are read at startup and saved when the user changes a setting. Preferences that require secure storage (e.g., API keys) are stored in the host platform’s protected key-value store (macOS Keychain, Windows Credential Locker, etc.) via the BeeWare secure storage helpers. When cross-platform access is required, the helpers expose a `keyring`-style abstraction so each secret feels like an app-scoped key/value pair instead of an ad-hoc file. Keys for LLM connector configuration KVPs are prefixed with `llm.{provider}.` (for example, `llm.anthropic.apikey`).
 

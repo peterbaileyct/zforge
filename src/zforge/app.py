@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
+import time
+from pathlib import Path
 
 import flet as ft
 
@@ -71,6 +74,28 @@ async def _prewarm_embedding(embedding_connector: LlamaCppEmbeddingConnector) ->
         log.exception("_prewarm_embedding: embedding model load failed")
 
 
+def _cleanup_debug_artifacts(experience_folder: str, retention_days: int) -> None:
+    """Delete experience-generation debug subdirectories older than *retention_days*.
+
+    Walks ``experiences-generation/`` (sibling of *experience_folder*) and removes any
+    immediate child directory whose modification time is older than the threshold.
+    Non-fatal — logs on error.
+    """
+    debug_base = Path(experience_folder).parent / "experiences-generation"
+    if not debug_base.is_dir():
+        return
+    cutoff = time.time() - retention_days * 86400
+    for child in debug_base.iterdir():
+        if not child.is_dir():
+            continue
+        try:
+            if child.stat().st_mtime < cutoff:
+                shutil.rmtree(child)
+                log.info("_cleanup_debug_artifacts: removed old debug folder %s", child)
+        except Exception:
+            log.exception("_cleanup_debug_artifacts: failed to remove %s", child)
+
+
 def _show_home(page: ft.Page, app_state: AppState) -> None:
     from zforge.ui.screens.home_screen import HomeScreen
 
@@ -109,6 +134,9 @@ async def main(page: ft.Page) -> None:
     config = config_service.load()
 
     app_state.config_service = config_service
+
+    # Clean up old debug artifact folders on every startup.
+    _cleanup_debug_artifacts(config.experience_folder, config.debug_artifact_retention_days)
 
     # Initialize LLM connector registry with all available connectors
     registry = ConnectorRegistry()

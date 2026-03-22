@@ -169,6 +169,9 @@ into valid Ink syntax.
 1. Use === knots ===, + choices, and -> diverts.
 2. Implement state variables as requested in the draft.
 3. Ensure all paths lead to a valid -> END.
+4. Every choice block must contain at least two options. A block with \
+only one choice is not a real decision — either remove it and use a \
+divert directly, or split the content into genuine alternatives.
 
 Produce the complete Ink script as your response — nothing else."""
 
@@ -187,6 +190,8 @@ script.
 2. Dead Ends: Flag any path that terminates without a proper -> END.
 3. Flow: Identify areas where the player might get "stuck" in a choice \
 cycle.
+4. False Choices: Flag any choice block that contains only a single \
+option — this is not a real decision and must be revised.
 
 Respond with ONLY a JSON object (no markdown fencing) with exactly these \
 keys: "status" (either "PASS" or "FAIL") and "feedback" (notes on \

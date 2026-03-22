@@ -95,6 +95,8 @@ class ZForgeConfig:
     entity_summarization_enabled: bool = True
     entity_summarization_max_passages: int = 20
     entity_summarization_max_chars: int = 40000
+    debug_experience_artifacts: bool = False
+    debug_artifact_retention_days: int = 30
 
     def to_dict(self) -> dict[str, Any]:
         llm_nodes_dict: dict[str, Any] = {}
@@ -126,6 +128,8 @@ class ZForgeConfig:
             "entity_summarization_enabled": self.entity_summarization_enabled,
             "entity_summarization_max_passages": self.entity_summarization_max_passages,
             "entity_summarization_max_chars": self.entity_summarization_max_chars,
+            "debug_experience_artifacts": self.debug_experience_artifacts,
+            "debug_artifact_retention_days": self.debug_artifact_retention_days,
         }
 
     @classmethod
@@ -161,4 +165,6 @@ class ZForgeConfig:
             entity_summarization_enabled=data.get("entity_summarization_enabled", True),
             entity_summarization_max_passages=data.get("entity_summarization_max_passages", 20),
             entity_summarization_max_chars=data.get("entity_summarization_max_chars", 40000),
+            debug_experience_artifacts=data.get("debug_experience_artifacts", False),
+            debug_artifact_retention_days=data.get("debug_artifact_retention_days", 30),
         )

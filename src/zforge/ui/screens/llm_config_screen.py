@@ -80,6 +80,8 @@ class LlmConfigScreen:
         self._chunk_overlap_pct_input: ft.TextField | None = None
         self._retrieval_chunk_size_input: ft.TextField | None = None
         self._retrieval_chunk_overlap_pct_input: ft.TextField | None = None
+        self._debug_artifacts_checkbox: ft.Checkbox | None = None
+        self._debug_retention_input: ft.TextField | None = None
 
     def build(self) -> ft.Control:
         controls: list[ft.Control] = []
@@ -98,6 +100,7 @@ class LlmConfigScreen:
         controls.extend(self._build_provider_section())
         controls.extend(self._build_local_model_section())
         controls.extend(self._build_parsing_section())
+        controls.extend(self._build_debug_section())
         controls.extend(self._build_button_row())
 
         return ft.Column(
@@ -265,6 +268,28 @@ class LlmConfigScreen:
             ),
             ft.Row([ft.Text("Retrieval chunk size:", width=160), self._retrieval_chunk_size_input, ft.Text("characters")]),
             ft.Row([ft.Text("Retrieval overlap:", width=160), self._retrieval_chunk_overlap_pct_input, ft.Text("% of retrieval chunk size")]),
+        ]
+
+    def _build_debug_section(self) -> list[ft.Control]:
+        config_service = self._state.config_service
+        config = config_service.load() if config_service else None
+        debug_enabled = config.debug_experience_artifacts if config else False
+        retention_days = config.debug_artifact_retention_days if config else 30
+
+        self._debug_artifacts_checkbox = ft.Checkbox(
+            label="Log experience generation artifacts to disk for debugging",
+            value=debug_enabled,
+        )
+        self._debug_retention_input = ft.TextField(value=str(retention_days), width=80)
+
+        return [
+            ft.Text("Experience Generation Debugging", size=14, weight=ft.FontWeight.BOLD),
+            self._debug_artifacts_checkbox,
+            ft.Row([
+                ft.Text("Clean up debug folders after:", width=220),
+                self._debug_retention_input,
+                ft.Text("days"),
+            ]),
         ]
 
     def _build_button_row(self) -> list[ft.Control]:
@@ -435,6 +460,15 @@ class LlmConfigScreen:
                 try:
                     config.embedding_context_size = max(
                         1, int(self._embedding_context_size_input.value or "8192")
+                    )
+                except ValueError:
+                    pass
+            if self._debug_artifacts_checkbox is not None:
+                config.debug_experience_artifacts = bool(self._debug_artifacts_checkbox.value)
+            if self._debug_retention_input:
+                try:
+                    config.debug_artifact_retention_days = max(
+                        1, int(self._debug_retention_input.value or "30")
                     )
                 except ValueError:
                     pass

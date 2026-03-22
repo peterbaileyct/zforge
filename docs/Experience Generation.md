@@ -205,6 +205,7 @@ The following are provided as inputs to the graph at entry:
         1.	Use === knots ===, + choices, and -> diverts.
         2.	Implement state variables as requested in the draft.
         3.	Ensure all paths lead to a valid -> END.
+        4.	Every choice block must contain at least two options. A block with only one choice is not a real decision — either remove it and use a divert directly, or split the content into genuine alternatives.
         
 * **Senior Scripter (Debugger)** — node: `ink_debugger`, default: `OpenAI` / `gpt-4.1`
     * Advanced troubleshooting. Resolves complex syntax errors, compiler warnings, and infinite loop recursion that the Junior Scripter fails to fix.
@@ -222,6 +223,7 @@ The following are provided as inputs to the graph at entry:
         1.	Pathing: Ensure all knots are reachable.
         2.	Dead Ends: Flag any path that terminates without a proper -> END.
         3.	Flow: Identify areas where the player might get "stuck" in a choice cycle.
+        4.	False Choices: Flag any choice block that contains only a single option — this is not a real decision and must be revised.
 * **Final Technical Reviewer (Auditor)** — node: `ink_auditor`, default: `Anthropic` / `claude-sonnet-4-5`
     * Final script verification. Audits for advanced Ink traps like variable scope leaks, improper state-setting, and complex nested logic errors.
         * Prompt:
@@ -275,6 +277,24 @@ Two additional fields in `ExperienceGenerationState` drive live UI feedback duri
 - **`tech_editor_feedback: str | None`** — Set by `outline_reviewer`/`prose_reviewer` when the Tech Editor also fails (alongside a Story Editor rejection). Used by the arbiter to reconstruct tech-only feedback if it overrules the Story Editor but the Tech Editor rejection stands.
 
   These fields are **not accumulated** across nodes — each node replaces them with its own output. Nodes that emit neither (e.g. `ink_scripter`, `ink_debugger`) simply omit both keys from their return dict.
+
+### Debug Artifacts
+
+When `ZForgeConfig.debug_experience_artifacts` is `True`, `ZForgeManager.start_experience_generation()` calls `_write_debug_artifacts()` immediately after `run_process()` completes (whether the run succeeded or not). The method writes the following state fields as individual `.txt` files under `experiences-generation/{experience_slug}/debug/` (a sibling of the configured `experience_folder`):
+
+| File | State field |
+|---|---|
+| `research_notes.txt` | `research_notes` |
+| `outline.txt` | `outline` |
+| `prose_draft.txt` | `prose_draft` |
+| `ink_script.txt` | `ink_script` |
+| `compiler_errors.txt` | `compiler_errors` (joined with newlines; omitted if empty) |
+| `outline_feedback.txt` | `outline_feedback` |
+| `prose_feedback.txt` | `prose_feedback` |
+| `qa_feedback.txt` | `qa_feedback` |
+| `audit_feedback.txt` | `audit_feedback` |
+
+Files whose corresponding state field is `None` or empty are not written. On every app startup, `_cleanup_debug_artifacts()` removes subdirectories in `experiences-generation/` older than `ZForgeConfig.debug_artifact_retention_days` (default 30). See [Application Configuration § Experience Generation Debugging](Application%20Configuration.md#experience-generation-debugging) and [File Storage](File%20Storage.md) for directory layout details.
 
 ### Pitfalls
 
