@@ -115,10 +115,10 @@ flowchart TD
 
 The following are provided as inputs to the graph at entry:
 
-- **World KVP** (required): The [ZWorld](../src/zforge/models/zworld.py) KVP metadata for the target world.
-- **World slug** (required): The kebab-case slug identifying the target world. Used to locate the Z-World hybrid data store and to construct the output path.
-- **Player preferences** (required): The player's preference profile, including tone, complexity, and content advisory tolerances.
-- **Player prompt** (optional): A free-text request from the player describing the experience they want (e.g. "a tense diplomatic negotiation with the High Council").
+- **World KVP** (optional): The [ZWorld](../src/zforge/models/zworld.py) KVP metadata for a selected world. If not provided, the retrieval tools (`query_world`, `retrieve_source`, etc.) are not available and the Outliner and downstream agents operate on the player prompt and player preferences alone.
+- **World slug** (optional): The kebab-case slug identifying the selected world. Required if World KVP is provided; used to locate the Z-World hybrid data store and to construct the output path.
+- **Player preferences** (required): The player's preference profile, including tone, complexity, content advisory tolerances, target length, and target knot count.
+- **Player prompt** (required): A free-text description from the player of the experience they want (e.g. "a tense diplomatic negotiation with the High Council").
 
 ## Agent Role & Prompt Specifications
 

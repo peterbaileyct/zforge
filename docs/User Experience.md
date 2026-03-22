@@ -25,7 +25,7 @@ When an ink experience has been started, the UI looks as follows:
 - **Main menu:** A main menu appears in the header on Mac/PC and is triggered by a "hamburger" menu icon to the left of the input area while an experience is on progress on mobile/Web. Options include:
   - Create
     - World
-    - Experience (only available if at least one World has been created)
+    - Experience
   - Save/Restore
     - Save (only available while an experience is in progress)
     - Restore (only available if at least one progress has been saved)
@@ -128,9 +128,58 @@ sequenceDiagram
 ## Pre-Gameplay interface
 If no experience is in progress:
  If progress within an experience has been saved, but that experience was not successfully completed before the last time Z-Forge was closed, the user will be asked if they want to continue {name of experience} at application start.
- In addition to their usual places in the main menu, buttons will appear offering the options to "Create World" and, if there is at least one ZWorld available, "Create Experience", and, if there is at least one experience available, "Start Experience" and, if there is at least one saved progress available within an experience, "Resume Experience".
+ In addition to their usual places in the main menu, buttons will appear offering the options to "Create World" and "Create Experience", and, if there is at least one experience available, "Start Experience" and, if there is at least one saved progress available within an experience, "Resume Experience".
 
 That same action row now keeps an "LLM Configuration" button in view so the user can reopen the model download/configuration workflow at any time; see [src/zforge/ui/screens/home_screen.py](src/zforge/ui/screens/home_screen.py).
+
+## Create Experience Screen
+
+Reached from the "Create Experience" button on the home screen or main menu. No world selection is required to reach this screen.
+
+### Layout
+
+#### Prompt
+A required multi-line text input at the top of the screen. Placeholder: "Describe the experience you want…". The **Generate** button (bottom of screen) is disabled until this field contains non-empty text.
+
+#### Create Your Universe
+A labelled section below the prompt for selecting data sources that will ground the generated experience.
+
+**Worlds** — a selectable list of all Z-Worlds available on the device. Zero or more worlds may be selected. If no world is selected, experience generation proceeds without retrieval tools (world-free mode). Future versions of this section will add further source types; see roadmap.
+
+#### Player Preferences Override
+A labelled collapsible section (collapsed by default) containing one input control per player preference field, as defined in [Player Preferences](Player%20Preferences.md). Populated with the user's current stored preferences on open; changes here are applied only to this generation run and do not update the stored preferences. The section header shows a summary badge ("using defaults" / "N fields overridden") so the player can see at a glance whether any overrides are active without expanding the section.
+
+Length and complexity controls appear here as numeric inputs (or sliders) within their defined ranges, defaulting to the stored player preference values (which themselves default to 6,000 words and 8 knots respectively).
+
+### Behaviour
+On **Generate**:
+1. Validate that the prompt field is non-empty (the button should already be disabled if not, but guard defensively).
+2. Collect selected world slugs, the prompt text, and the merged player preferences (stored preferences overridden by any non-default values from the override section).
+3. Navigate to the generation progress screen and invoke `ExperienceManager.generate(...)` with these inputs.
+
+### Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant CE as CreateExperienceScreen
+    participant EM as ExperienceManager
+
+    U->>CE: Open "Create Experience"
+    CE-->>U: Display prompt field, world list, preferences
+
+    opt Select world(s)
+        U->>CE: Toggle world selection
+    end
+
+    opt Override preferences
+        U->>CE: Expand preferences section, edit fields
+    end
+
+    U->>CE: Enter prompt, tap "Generate"
+    CE->>EM: generate(prompt, world_slugs, player_preferences)
+    CE-->>U: Navigate to generation progress screen
+```
 
 ## LLM Configuration
 LLM configuration is a crucial element of the [app config](Application%20Configuration.md). The user is able to specify the provider and model for each LLM node in each [Process](Processes.md). When viewing the LLM configuration screen, the user will see a display of Processes with their LLM Nodes; for each node, they can select a Provider (from among all available LLM Connectors) and a model (from among the models available for the chosen Connector). If no value, or an invalid value, already exists in the application config for a given node, it will be defaulted to the provider and model listed in the specification for that node of that Process. After the user updates the LLM configuration, the app will check that all required configuration values have been provided for all the selected providers across all nodes; if not, they will be prompted for these configuration values as defined in the LLM Connector Configuration section.

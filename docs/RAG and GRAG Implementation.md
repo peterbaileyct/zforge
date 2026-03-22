@@ -71,18 +71,21 @@ Code that writes to either store must preserve this contract. Code that queries 
 ## Retrieval Patterns
 
 These patterns apply to any [Process](Processes.md) that queries a Z-Bundle. They are listed in order of increasing specificity and decreasing LLM round-trip cost.
-
+0-p[pokl;'
+][pop;[']p;'[]p;'/[p;'/[po;'/[pol;'/[]-pm ,'
+]=[-p'/
+]]]]]]
 ### Unified Entity Query (`query_world`) — primary tool
 
 ```
-query_world(query: str, entity_type: str | None = None, k: int = 3, include_neighbors: bool = False) → str
+query_world(query: str, entity_type: str | None = None, take_top_matches: int = 1, include_neighbors: bool = False) → str
 ```
 
 Resolves a natural-language question to a structured response in a single tool call by combining semantic entity matching, graph neighbourhood expansion, and optional neighbour summary hydration:
 
-1. **Semantic match:** Run vector similarity search against the `entities` table to find the top-`k` matching entity summaries. If `entity_type` is provided, apply a LanceDB `where` clause to restrict to that type. If the `entities` table is absent (Phase 5 was skipped), fall back to the `chunks` table.
+1. **Semantic match:** Run vector similarity search against the `entities` table to find the top-`take_top_matches` matching entity summaries. If `entity_type` is provided, apply a LanceDB `where` clause to restrict to that type. If the `entities` table is absent (Phase 5 was skipped), fall back to the `chunks` table.
 2. **Graph expansion:** For each matched entity, look up its 1-hop graph neighbourhood in KuzuDB — all incoming and outgoing non-Chunk edges, including relationship type, direction, neighbour id, neighbour type, and any populated relationship properties.
-3. **Neighbour hydration (optional):** If `include_neighbors=True`, fetch the `entities` table row for each unique neighbour to include its summary text alongside its own 1-hop relationships. Capped at `k` neighbour summaries per matched entity to avoid context overflow.
+3. **Neighbour hydration (optional):** If `include_neighbors=True`, fetch the `entities` table row for each unique neighbour to include its summary text alongside its own 1-hop relationships. Capped at `take_top_matches` neighbour summaries per matched entity to avoid context overflow.
 
 Return format (structured text):
 
@@ -93,9 +96,9 @@ Summary: Ankh-Morpork is the largest city on the Disc…
 Relationships:
   → located_in → The Disc (region)
   ← based_in ← City Watch (organization)  [role: law enforcement]
-  ← controls ← Lord Vetinari (character)  [from_time: "the Interregnum"]
+  ← controls ← Havelock Vetinari (character)  [from_time: "the Interregnum"]
 
-[Neighbour: "Lord Vetinari" (character)]  ← only if include_neighbors=True
+[Neighbour: "Havelock Vetinari" (character)]  ← only if include_neighbors=True
 Summary: Havelock Vetinari is the Patrician of Ankh-Morpork…
 Relationships:
   → controls → Ankh-Morpork (location)
@@ -107,10 +110,159 @@ This is the default tool for all world-querying agents. A typical entity-centric
 ### Verbatim Source Retrieval (`retrieve_source`)
 
 ```
-retrieve_source(query: str, entity_type: str | None = None, k: int = 5) → list[str]
+retrieve_source(query: str, entity_type: str | None = None, take_top_matches: int = 5) → list[str]
 ```
 
 Semantic similarity search against the `chunks` table only. Returns raw source sub-chunks for verbatim fact retrieval. Use when the question requires exact wording (contradictions, rumours, specific quotes) or when entity summaries may over-synthesize details. The optional `entity_type` filter applies a LanceDB `where` clause to restrict to chunks whose primary entity is of that type.
+
+### Relationship Query (`find_relationship`, `find_relationship_by_name`)
+
+Two tools for answering questions of the form "what is the relationship between X and Y?"
+
+```
+find_relationship(entity_id_a: str, entity_id_b: str) → str
+```
+
+Pure graph traversal between two known entity IDs. Executes two complementary Cypher queries:
+
+1. **Direct edges** — all edges in either direction between the two nodes, excluding `Chunk` nodes:
+   `MATCH (a)-[r]-(b) WHERE a.id = $id_a AND b.id = $id_b AND NOT label(a) = 'Chunk' AND NOT label(b) = 'Chunk' RETURN type(r), label(a), a.id, label(b), b.id`
+2. **Shared neighbours** — intermediate nodes that both entities connect to (1-hop common ground):
+   `MATCH (a)-[r1]-(m)-[r2]-(b) WHERE a.id = $id_a AND b.id = $id_b AND NOT label(m) = 'Chunk' RETURN label(m), m.id, type(r1), type(r2)`
+
+Return format (structured text):
+
+```
+[Relationship: "Havelock Vetinari" (character) ↔ "Ankh-Morpork" (location)]
+
+Direct edges:
+  Havelock Vetinari → controls → Ankh-Morpork
+
+Shared neighbours:
+  both connected via: Unseen University (organization)
+    Havelock Vetinari → oversees → Unseen University
+    Ankh-Morpork ← located_in ← Unseen University
+```
+
+If neither direct edges nor shared neighbours exist, returns a plain statement that no graph relationship was found.
+
+---
+
+```
+find_relationship_by_name(
+    name_a: str,
+    name_b: str,
+    entity_type_a: str | None = None,
+    entity_type_b: str | None = None
+) → str
+```
+
+Name-resolution wrapper around `find_relationship`. Performs two parallel vector similarity lookups against the `entities` table (one per name, each with `take_top_matches=1`) with optional `entity_type` filters, extracts the `entity_id` from each top result, then calls `find_relationship(entity_id_a, entity_id_b)`. Prepends the resolved entity identities to the output so the caller can confirm the intended entities were matched:
+
+```
+Resolved: "Vetinari" → "Havelock Vetinari" (character)
+Resolved: "the city" → "Ankh-Morpork" (location)
+
+[Relationship: …]
+…
+```
+
+If either lookup returns no result, returns a plain statement that the named entity could not be resolved, and does not call `find_relationship`.
+
+This is the default tool for relationship questions when the caller has plain-text names rather than stable entity IDs. Use `find_relationship` directly when IDs are already known (e.g. from a prior `query_world` response).
+
+### Entity Catalog (`list_entities`)
+
+```
+list_entities(entity_type: str, limit: int = 20) → str
+```
+
+Deterministic catalog scan of a single KuzuDB node table. Returns up to `limit` entities of the given type, each with their `id`, `type`, and `text` fields. No vector search — pure graph read:
+
+```cypher
+MATCH (n:<EntityType>) RETURN n.id, n.type, n.text LIMIT $limit
+```
+
+Return format (structured text):
+
+```
+[Entity Catalog: character (20 results)]
+- "Havelock Vetinari" (character): The Patrician of Ankh-Morpork…
+- "Sam Vimes" (character): Commander of the City Watch…
+…
+```
+
+Use for questions like "who are all the characters in this world?" or when building a complete scene roster at the start of experience generation. `entity_type` must be one of the `allowed_nodes` for the Z-Bundle (e.g. `character`, `location`, `organization`).
+
+### Targeted Neighbour Traversal (`get_neighbors`)
+
+```
+get_neighbors(
+    entity_id: str,
+    relationship_type: str | None = None,
+    neighbor_type: str | None = None
+) → str
+```
+
+Targeted 1-hop graph traversal from a known entity ID. Returns all neighbouring entities with their relationship type and direction, optionally filtered by relationship type and/or neighbour type. No vector search — pure graph read. Excludes `Chunk` nodes.
+
+Return format (structured text):
+
+```
+[Neighbours of "Ankh-Morpork" (location)]
+  ← based_in ← City Watch (organization)
+  ← controls ← Havelock Vetinari (character)
+  → located_in → The Disc (region)
+```
+
+Use when iteratively building scene context from entities already identified — more surgical than `query_world` with neighbour hydration because it involves no vector search and no summary fetching. Also useful for "what characters are at this location?", "what items does this character carry?", etc.
+
+### Path Query (`find_path`)
+
+```
+find_path(entity_id_a: str, entity_id_b: str, max_depth: int = 4) → str
+```
+
+Shortest-path traversal between two known entity IDs using KuzuDB's `shortestPath` algorithm, excluding `Chunk` nodes, up to `max_depth` hops. Answers "how is X connected to Y through the world graph?" where no direct or 1-hop shared relationship exists. Surfaces non-obvious narrative hooks and indirect power structures.
+
+Executes:
+```cypher
+MATCH p = shortestPath((a)-[*1..$max_depth]-(b))
+WHERE a.id = $id_a AND b.id = $id_b
+AND ALL(n IN nodes(p) WHERE NOT label(n) = 'Chunk')
+RETURN [n IN nodes(p) | {id: n.id, type: label(n)}],
+       [r IN relationships(p) | type(r)]
+```
+
+Return format (structured text):
+
+```
+[Path: "Tiffany Aching" (character) → "The Long Man" (location)]
+Depth: 3
+  Tiffany Aching → lives_in → The Chalk (location)
+  The Chalk → part_of → The Ramtops (region)
+  The Ramtops → contains → The Long Man (location)
+```
+
+If no path exists within `max_depth`, returns a plain statement to that effect. Use `find_relationship` first for direct/1-hop queries; use `find_path` when those return no results or when the question explicitly asks about indirect connections.
+
+### Entity Source Passages (`get_source_passages`)
+
+```
+get_source_passages(entity_id: str, take_top_matches: int = 5) → list[str]
+```
+
+Retrieves raw source chunks that mention a known entity by following `MENTIONS` edges in KuzuDB — no vector search. More precise and cheaper than `retrieve_source` when the entity is already identified, because it goes directly to the graph rather than re-running a similarity search.
+
+Executes:
+```cypher
+MATCH (c:Chunk)-[:MENTIONS]->(n)
+WHERE n.id = $entity_id
+RETURN c.text
+LIMIT $take_top_matches
+```
+
+Returns the raw `text` field of each matching `Chunk` node as a list of strings. Use when an agent needs verbatim source grounding for a specific entity it has already found via `query_world` or another graph tool, without paying the cost of a second vector round-trip.
 
 ### Vector-Seeded Graph Expansion (code pattern)
 
@@ -129,7 +281,7 @@ LanceDB supports full-text (BM25) indexing alongside vector indexing on the same
 
 Each Z-Bundle is stored in `bundles/{typeslug}/{slug}/` on the local filesystem (see [File Storage](File%20Storage.md) for the resolved base path).
 
-The `make_world_query_tools(z_bundle_root, allowed_node_labels, embedding_connector)` factory in `graph_utils.py` constructs and returns both `query_world` and `retrieve_source` as a tuple. It takes `allowed_node_labels` as a parameter (the same `allowed_nodes` list used at ingest time) so the graph keyword branch can query the correct set of node tables without hardcoding them. **Each Z-Bundle type that uses these tools must pass its own `allowed_nodes` list when constructing them.**
+The `make_world_query_tools(z_bundle_root, allowed_node_labels, embedding_connector)` factory in `graph_utils.py` constructs and returns all eight tools as a tuple: `query_world`, `retrieve_source`, `find_relationship`, `find_relationship_by_name`, `list_entities`, `get_neighbors`, `find_path`, and `get_source_passages`. It takes `allowed_node_labels` as a parameter (the same `allowed_nodes` list used at ingest time) so the graph keyword branch can query the correct set of node tables without hardcoding them. **Each Z-Bundle type that uses these tools must pass its own `allowed_nodes` list when constructing them.**
 
 ### Pitfall: `query_world` graph expansion must execute queries, not just return the schema
 

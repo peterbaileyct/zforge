@@ -7,6 +7,8 @@ Player Preferences in Z-Forge consist of a few simple user-defined data points. 
 - Levity scale: Does the player generally prefer a somber/intense or funny/uplifting experience?
 - General preferences: Free text allowing the player to further describe their general preferences in interactive fiction.
 - Logical vs. mood scale: How important is it to the player that the experience is logically consistent, e.g. is a discrepancy between the color of a character's hair in dialog 1 and dialog 2 acceptable, or is it not OK if a story takes place in the real world and a character smokes a brand of cigarette that was no longer manufactured at the time in which the story takes place? Weighed against the need to establish a mood appropriate to their established preferences.
+- Length: The approximate target length of the generated experience in words of prose. Range: 1,000–15,000 words; default: 6,000 words.
+- Complexity: The approximate number of Ink knots in the generated experience (a proxy for narrative branching density). Range: 3–20 knots; default: 8 knots.
 
 ## Implementation
 Player preferences are stored in JSON format in "preferences.json".
