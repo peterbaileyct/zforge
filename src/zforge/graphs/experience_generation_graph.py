@@ -262,23 +262,32 @@ def _make_outline_author_node(
             _model_cache.append(llm_connector.get_model(model_name))
         model = _model_cache[0]
 
-        z_bundle_root = state["z_bundle_root"]
+        z_bundle_root = state.get("z_bundle_root")
 
-        # Build retriever tools for this Z-Bundle
-        query_world, retrieve_source = make_world_query_tools(
-            z_bundle_root, ALLOWED_NODES, embedding_connector
-        )
-        tools = [query_world, retrieve_source]
+        # Build retriever tools for this Z-Bundle (if a world is provided)
+        tools: list[Any] = []
+        if z_bundle_root is not None:
+            (
+                query_world, retrieve_source, find_relationship,
+                find_relationship_by_name, list_entities, get_neighbors,
+                find_path, get_source_passages,
+            ) = make_world_query_tools(
+                z_bundle_root, ALLOWED_NODES, embedding_connector
+            )
+            tools = [
+                query_world, retrieve_source, find_relationship,
+                find_relationship_by_name, list_entities, get_neighbors,
+                find_path, get_source_passages,
+            ]
 
         # Build messages
-        world_context = json.dumps(state["zworld_kvp"], indent=2)
+        world_context = json.dumps(state.get("zworld_kvp") or {}, indent=2)
         prefs_context = json.dumps(state["preferences"], indent=2)
         human_parts = [
             f"World metadata:\n{world_context}",
             f"\nPlayer preferences:\n{prefs_context}",
+            f"\nPlayer request: {state['player_prompt']}",
         ]
-        if state.get("player_prompt"):
-            human_parts.append(f"\nPlayer request: {state['player_prompt']}")
         if state.get("outline_feedback"):
             human_parts.append(
                 f"\nThe reviewers rejected your previous outline with this "
@@ -291,7 +300,7 @@ def _make_outline_author_node(
         ]
 
         # Agentic RAG loop
-        bound_model = model.bind_tools(tools)
+        bound_model = model.bind_tools(tools) if tools else model
         tool_map = {t.name: t for t in tools}
         tool_calls_log: list[dict[str, Any]] = []
 
@@ -392,7 +401,7 @@ def _make_dual_reviewer_node(
         model = _model_cache[0]
 
         artifact = state.get(artifact_key, "") or ""
-        world_context = json.dumps(state["zworld_kvp"], indent=2)
+        world_context = json.dumps(state.get("zworld_kvp") or {}, indent=2)
 
         human_content = (
             f"World metadata:\n{world_context}\n\n"
@@ -408,14 +417,24 @@ def _make_dual_reviewer_node(
         tech_content = extract_text_content(getattr(tech_response, "content", ""))
         tech_result = _parse_json_response(tech_content) or {"status": "PASS", "feedback": ""}
 
-        # Story Editor review (agentic — with query_world + retrieve_source)
-        z_bundle_root = state["z_bundle_root"]
-        query_world, retrieve_source = make_world_query_tools(
-            z_bundle_root, ALLOWED_NODES, embedding_connector
-        )
-        story_tools = [query_world, retrieve_source]
+        # Story Editor review (agentic — with retrieval tools when a world is provided)
+        z_bundle_root = state.get("z_bundle_root")
+        story_tools: list[Any] = []
+        if z_bundle_root is not None:
+            (
+                query_world, retrieve_source, find_relationship,
+                find_relationship_by_name, list_entities, get_neighbors,
+                find_path, get_source_passages,
+            ) = make_world_query_tools(
+                z_bundle_root, ALLOWED_NODES, embedding_connector
+            )
+            story_tools = [
+                query_world, retrieve_source, find_relationship,
+                find_relationship_by_name, list_entities, get_neighbors,
+                find_path, get_source_passages,
+            ]
         story_tool_map = {t.name: t for t in story_tools}
-        story_bound = model.bind_tools(story_tools)
+        story_bound = model.bind_tools(story_tools) if story_tools else model
         story_tool_calls_log: list[dict[str, Any]] = []
 
         story_messages: list[BaseMessage] = [
@@ -569,7 +588,7 @@ def _make_arbiter_node(
             _model_cache.append(llm_connector.get_model(model_name))
         model = _model_cache[0]
 
-        player_prompt = state.get("player_prompt") or "(no player prompt provided)"
+        player_prompt = state["player_prompt"]
         story_feedback = state.get("story_editor_feedback") or ""
 
         messages = [
@@ -661,12 +680,22 @@ def _make_prose_writer_node(
             _model_cache.append(llm_connector.get_model(model_name))
         model = _model_cache[0]
 
-        z_bundle_root = state["z_bundle_root"]
+        z_bundle_root = state.get("z_bundle_root")
 
-        query_world, retrieve_source = make_world_query_tools(
-            z_bundle_root, ALLOWED_NODES, embedding_connector
-        )
-        tools = [query_world, retrieve_source]
+        tools: list[Any] = []
+        if z_bundle_root is not None:
+            (
+                query_world, retrieve_source, find_relationship,
+                find_relationship_by_name, list_entities, get_neighbors,
+                find_path, get_source_passages,
+            ) = make_world_query_tools(
+                z_bundle_root, ALLOWED_NODES, embedding_connector
+            )
+            tools = [
+                query_world, retrieve_source, find_relationship,
+                find_relationship_by_name, list_entities, get_neighbors,
+                find_path, get_source_passages,
+            ]
 
         human_parts = [
             f"Outline:\n{state.get('outline', '')}",
@@ -683,7 +712,7 @@ def _make_prose_writer_node(
             HumanMessage(content="\n".join(human_parts)),
         ]
 
-        bound_model = model.bind_tools(tools)
+        bound_model = model.bind_tools(tools) if tools else model
         tool_map = {t.name: t for t in tools}
         tool_calls_log: list[dict[str, Any]] = []
 

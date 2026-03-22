@@ -111,8 +111,6 @@ class HomeScreen:
                 )
             )
 
-        has_worlds = len(worlds) > 0
-        self._btn_create_experience.disabled = not has_worlds
         self._btn_details.disabled = self._selected_world_slug is None
         self._btn_reindex.disabled = self._selected_world_slug is None
 
@@ -184,20 +182,15 @@ class HomeScreen:
             navigate(self._page, screen.build())
 
     def _on_create_experience(self, e: ft.Event[ft.Button]) -> None:
-        if self._selected_world_slug and self._state.zforge_manager:
-            zworld = self._state.zforge_manager.zworld_manager.read(
-                self._selected_world_slug
-            )
-            if zworld:
-                from zforge.app import navigate
-                from zforge.ui.screens.generate_experience_screen import (
-                    GenerateExperienceScreen,
-                )
+        from zforge.app import navigate
+        from zforge.ui.screens.generate_experience_screen import (
+            GenerateExperienceScreen,
+        )
 
-                screen = GenerateExperienceScreen(
-                    self._page, self._state, zworld, on_done=self._go_home
-                )
-                navigate(self._page, screen.build())
+        screen = GenerateExperienceScreen(
+            self._page, self._state, on_done=self._go_home
+        )
+        navigate(self._page, screen.build())
 
     def _on_start_experience(self, e: ft.Event[ft.Button]) -> None:
         exp = self._selected_experience

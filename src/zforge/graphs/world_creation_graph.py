@@ -176,7 +176,10 @@ def _make_summarizer_node(
         z_bundle_root = state.get("z_bundle_root") or ""
 
         # Build retriever tools for this Z-Bundle
-        query_world, retrieve_source = make_world_query_tools(
+        (
+            query_world, retrieve_source, _find_rel, _find_rel_name,
+            _list_ent, _get_nb, _find_p, _get_src,
+        ) = make_world_query_tools(
             z_bundle_root, ALLOWED_NODES, embedding_connector
         )
 

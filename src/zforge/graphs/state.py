@@ -27,11 +27,11 @@ class ExperienceGenerationState(TypedDict):
     """
 
     # Inputs (set at initialization)
-    zworld_kvp: dict[str, Any]
-    world_slug: str
-    z_bundle_root: str
+    zworld_kvp: dict[str, Any] | None
+    world_slug: str | None
+    z_bundle_root: str | None
     preferences: dict[str, Any]
-    player_prompt: str | None
+    player_prompt: str
 
     # Artifacts (set by agent nodes during execution)
     outline: str | None

@@ -20,6 +20,8 @@ class PlayerPreferences:
     levity: int = 5
     general_preferences: str = ""
     logical_vs_mood: int = 5
+    length: int = 6000
+    complexity: int = 8
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -29,6 +31,8 @@ class PlayerPreferences:
             "levity": self.levity,
             "generalPreferences": self.general_preferences,
             "logicalVsMood": self.logical_vs_mood,
+            "length": self.length,
+            "complexity": self.complexity,
         }
 
     @classmethod
@@ -40,6 +44,8 @@ class PlayerPreferences:
             levity=data.get("levity", 5),
             general_preferences=data.get("generalPreferences", ""),
             logical_vs_mood=data.get("logicalVsMood", 5),
+            length=data.get("length", 6000),
+            complexity=data.get("complexity", 8),
         )
 
 

@@ -16,6 +16,8 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from langchain_core.tools import BaseTool
+
 log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -220,13 +222,24 @@ def make_world_query_tools(
     z_bundle_root: str,
     allowed_node_labels: list[str],
     embedding_connector: EmbeddingConnector,
-) -> tuple[Any, Any]:
-    """Factory that returns ``(query_world, retrieve_source)`` LangChain tools.
+) -> tuple[BaseTool, BaseTool, BaseTool, BaseTool, BaseTool, BaseTool, BaseTool, BaseTool]:
+    """Factory that returns all eight Z-Bundle query tools as LangChain tools.
 
-    Both tools query the Z-Bundle at *z_bundle_root*.  ``query_world`` is the
-    primary tool — it combines semantic entity matching, 1-hop graph expansion,
-    and optional neighbour hydration into a single call.  ``retrieve_source``
-    returns verbatim source passages from the ``chunks`` table.
+    The returned tools are:
+
+    1. ``query_world`` — semantic entity matching + graph expansion + optional
+       neighbour hydration.
+    2. ``retrieve_source`` — verbatim source passage retrieval from the chunks
+       table.
+    3. ``find_relationship`` — direct edges and shared 1-hop neighbours between
+       two known entity IDs.
+    4. ``find_relationship_by_name`` — name-resolution wrapper around
+       ``find_relationship``; resolves plain-text names via vector lookup.
+    5. ``list_entities`` — deterministic catalog scan of a single entity type.
+    6. ``get_neighbors`` — targeted 1-hop graph traversal from a known entity ID.
+    7. ``find_path`` — shortest-path traversal between two known entity IDs.
+    8. ``get_source_passages`` — raw source chunks mentioning a known entity via
+       MENTIONS edges.
 
     Args:
         z_bundle_root: Filesystem path to the Z-Bundle root directory.
@@ -234,7 +247,7 @@ def make_world_query_tools(
         embedding_connector: Embedding connector (provides ``get_embeddings()``).
 
     Returns:
-        A ``(query_world, retrieve_source)`` tuple of LangChain tools.
+        An 8-tuple of LangChain ``BaseTool`` instances.
     """
     from langchain_core.tools import tool
 
@@ -326,7 +339,7 @@ def make_world_query_tools(
 
     # ---- Async vector helpers -------------------------------------------
 
-    async def _vector_search(table_name: str, query: str, k: int,
+    async def _vector_search(table_name: str, query: str, take_top_matches: int,
                              entity_type: str | None = None) -> list[dict[str, Any]]:
         """Run ANN search on a LanceDB table. Returns list of row dicts."""
         import lancedb
@@ -352,7 +365,7 @@ def make_world_query_tools(
         search_q = await tbl.search(query_vec, query_type="vector")
         if entity_type:
             search_q = search_q.where(f"entity_type = '{entity_type}'")
-        results_arrow = await search_q.limit(k).to_arrow()
+        results_arrow = await search_q.limit(take_top_matches).to_arrow()
         # Convert to list of dicts
         cols = results_arrow.column_names
         rows: list[dict[str, Any]] = []
@@ -364,13 +377,29 @@ def make_world_query_tools(
             rows.append(row)
         return rows
 
+    # ---- Internal helpers: PascalCase resolution --------------------------
+
+    def _resolve_pascal_label(entity_type: str) -> str | None:
+        """Convert a snake_case entity type to its PascalCase node label.
+
+        Returns ``None`` if no matching label is found in *allowed_node_labels*.
+        """
+        lowered = entity_type.replace("_", "")
+        for lbl in allowed_node_labels:
+            if lbl.lower() == lowered:
+                return lbl
+        candidate = "".join(w.capitalize() for w in entity_type.split("_"))
+        if candidate in allowed_node_labels:
+            return candidate
+        return None
+
     # ---- Tool: query_world ----------------------------------------------
 
     @tool
     async def query_world(
         query: str,
         entity_type: str | None = None,
-        k: int = 3,
+        take_top_matches: int = 1,
         include_neighbors: bool = False,
     ) -> str:
         """Look up entities in the world by description or name.
@@ -382,12 +411,12 @@ def make_world_query_tools(
         Args:
             query: Natural language search query or entity name.
             entity_type: Optional entity type filter (snake_case, e.g. "character").
-            k: Number of top entity matches to return (default 3).
+            take_top_matches: Number of top entity matches to return (default 1).
             include_neighbors: If True, also return summaries and relationships
                 for each matched entity's 1-hop neighbours.
         """
         # Step 1: Semantic match against entities table
-        rows = await _vector_search("entities", query, k, entity_type)
+        rows = await _vector_search("entities", query, take_top_matches, entity_type)
         if not rows:
             return "No matching entities found."
 
@@ -400,16 +429,7 @@ def make_world_query_tools(
             summary = row.get("text", "")
 
             # Determine the PascalCase label for graph queries
-            pascal_label = None
-            for lbl in allowed_node_labels:
-                if lbl.lower() == etype.replace("_", ""):
-                    pascal_label = lbl
-                    break
-            if not pascal_label:
-                # Try matching by converting snake_case → PascalCase
-                candidate = "".join(w.capitalize() for w in etype.split("_"))
-                if candidate in allowed_node_labels:
-                    pascal_label = candidate
+            pascal_label = _resolve_pascal_label(etype)
 
             entity_block = f'[Entity: "{eid}" ({etype})]\nSummary: {summary}'
 
@@ -428,7 +448,7 @@ def make_world_query_tools(
                             f"MATCH (n:{pascal_label})-[r]-(m) WHERE n.id = $nid "
                             f"AND NOT label(m) = 'Chunk' "
                             f"RETURN DISTINCT m.id AS mid, label(m) AS mlabel "
-                            f"LIMIT {k * 3}",
+                            f"LIMIT {take_top_matches * 3}",
                             params={"nid": eid},
                         ):
                             if r.get("mid") and r.get("mlabel"):
@@ -436,8 +456,8 @@ def make_world_query_tools(
                     except Exception:
                         pass
 
-                    # Hydrate up to k neighbours
-                    for n_label, n_id in neighbour_ids[:k]:
+                    # Hydrate up to take_top_matches neighbours
+                    for n_label, n_id in neighbour_ids[:take_top_matches]:
                         n_type = n_label.lower()
                         # Fetch summary from entities table
                         n_rows = await _vector_search(
@@ -465,7 +485,7 @@ def make_world_query_tools(
     async def retrieve_source(
         query: str,
         entity_type: str | None = None,
-        k: int = 5,
+        take_top_matches: int = 5,
     ) -> str:
         """Retrieve verbatim source passages from the world text.
 
@@ -475,9 +495,9 @@ def make_world_query_tools(
         Args:
             query: Natural language search query.
             entity_type: Optional entity type filter (snake_case, e.g. "character").
-            k: Number of passages to return (default 5).
+            take_top_matches: Number of passages to return (default 5).
         """
-        rows = await _vector_search("chunks", query, k, entity_type)
+        rows = await _vector_search("chunks", query, take_top_matches, entity_type)
         if not rows:
             return "No source passages found."
         texts = [r.get("text", "") for r in rows if r.get("text")]
@@ -485,7 +505,350 @@ def make_world_query_tools(
             return "No source passages found."
         return "\n\n---\n\n".join(texts)
 
-    return query_world, retrieve_source
+    # ---- Tool: find_relationship ----------------------------------------
+
+    @tool
+    async def find_relationship(
+        entity_id_a: str,
+        entity_id_b: str,
+    ) -> str:
+        """Find the graph relationship between two known entity IDs.
+
+        Executes two Cypher queries: direct edges in either direction and
+        shared 1-hop neighbours.  Use when entity IDs are already known from
+        a prior query_world response.
+
+        Args:
+            entity_id_a: First entity ID.
+            entity_id_b: Second entity ID.
+        """
+        graph = _get_kuzu_graph()
+        parts: list[str] = []
+
+        # Direct edges (either direction, excluding Chunk nodes)
+        direct_lines: list[str] = []
+        try:
+            for row in graph.query(
+                "MATCH (a)-[r]-(b) "
+                "WHERE a.id = $id_a AND b.id = $id_b "
+                "AND NOT label(a) = 'Chunk' AND NOT label(b) = 'Chunk' "
+                "RETURN type(r) AS rel, label(a) AS a_label, a.id AS a_id, "
+                "label(b) AS b_label, b.id AS b_id",
+                params={"id_a": entity_id_a, "id_b": entity_id_b},
+            ):
+                direct_lines.append(
+                    f"  {row.get('a_id')} → {row.get('rel')} → {row.get('b_id')}"
+                )
+        except Exception:
+            pass
+
+        # Shared neighbours (1-hop common ground)
+        shared_lines: list[str] = []
+        try:
+            for row in graph.query(
+                "MATCH (a)-[r1]-(m)-[r2]-(b) "
+                "WHERE a.id = $id_a AND b.id = $id_b "
+                "AND NOT label(m) = 'Chunk' "
+                "RETURN label(m) AS m_label, m.id AS m_id, "
+                "type(r1) AS r1_type, type(r2) AS r2_type",
+                params={"id_a": entity_id_a, "id_b": entity_id_b},
+            ):
+                m_label = (row.get("m_label") or "").lower()
+                m_id = row.get("m_id", "")
+                shared_lines.append(
+                    f"  both connected via: {m_id} ({m_label})\n"
+                    f"    {entity_id_a} → {row.get('r1_type')} → {m_id}\n"
+                    f"    {entity_id_b} → {row.get('r2_type')} → {m_id}"
+                )
+        except Exception:
+            pass
+
+        if not direct_lines and not shared_lines:
+            return (
+                f"No graph relationship found between "
+                f'"{entity_id_a}" and "{entity_id_b}".'
+            )
+
+        header = (
+            f'[Relationship: "{entity_id_a}" ↔ "{entity_id_b}"]'
+        )
+        parts.append(header)
+        if direct_lines:
+            parts.append("\nDirect edges:\n" + "\n".join(direct_lines))
+        if shared_lines:
+            parts.append("\nShared neighbours:\n" + "\n".join(shared_lines))
+
+        return "\n".join(parts)
+
+    # ---- Tool: find_relationship_by_name --------------------------------
+
+    @tool
+    async def find_relationship_by_name(
+        name_a: str,
+        name_b: str,
+        entity_type_a: str | None = None,
+        entity_type_b: str | None = None,
+    ) -> str:
+        """Find the relationship between two entities by name.
+
+        Resolves plain-text names to entity IDs via vector search, then calls
+        find_relationship.  Use when you have names rather than stable IDs.
+
+        Args:
+            name_a: Name or description of the first entity.
+            name_b: Name or description of the second entity.
+            entity_type_a: Optional type filter for the first entity (snake_case).
+            entity_type_b: Optional type filter for the second entity (snake_case).
+        """
+        results_a, results_b = await asyncio.gather(
+            _vector_search("entities", name_a, 1, entity_type_a),
+            _vector_search("entities", name_b, 1, entity_type_b),
+        )
+
+        if not results_a:
+            return f'Could not resolve entity: "{name_a}"'
+        if not results_b:
+            return f'Could not resolve entity: "{name_b}"'
+
+        id_a = results_a[0].get("entity_id", "")
+        type_a = results_a[0].get("entity_type", "")
+        id_b = results_b[0].get("entity_id", "")
+        type_b = results_b[0].get("entity_type", "")
+
+        resolved_header = (
+            f'Resolved: "{name_a}" → "{id_a}" ({type_a})\n'
+            f'Resolved: "{name_b}" → "{id_b}" ({type_b})\n'
+        )
+
+        relationship_result = await find_relationship.ainvoke(
+            {"entity_id_a": id_a, "entity_id_b": id_b}
+        )
+        return resolved_header + "\n" + str(relationship_result)
+
+    # ---- Tool: list_entities --------------------------------------------
+
+    @tool
+    async def list_entities(
+        entity_type: str,
+        limit: int = 20,
+    ) -> str:
+        """List entities of a given type from the world graph.
+
+        Deterministic catalog scan — no vector search.  Use for questions like
+        "who are all the characters?" or when building a roster.
+
+        Args:
+            entity_type: Entity type in snake_case (e.g. "character", "location").
+            limit: Maximum number of entities to return (default 20).
+        """
+        pascal_label = _resolve_pascal_label(entity_type)
+        if not pascal_label:
+            return f'Unknown entity type: "{entity_type}"'
+
+        graph = _get_kuzu_graph()
+        entries: list[str] = []
+        try:
+            for row in graph.query(
+                f"MATCH (n:{pascal_label}) "
+                f"RETURN n.id AS id, n.type AS type, n.text AS text "
+                f"LIMIT {int(limit)}",
+            ):
+                eid = row.get("id", "")
+                etype = (row.get("type") or entity_type).lower()
+                text = row.get("text", "")
+                entries.append(f'- "{eid}" ({etype}): {text}')
+        except Exception:
+            return f'Error querying entity type: "{entity_type}"'
+
+        if not entries:
+            return f'No entities of type "{entity_type}" found.'
+
+        header = f"[Entity Catalog: {entity_type} ({len(entries)} results)]"
+        return header + "\n" + "\n".join(entries)
+
+    # ---- Tool: get_neighbors --------------------------------------------
+
+    @tool
+    async def get_neighbors(
+        entity_id: str,
+        relationship_type: str | None = None,
+        neighbor_type: str | None = None,
+    ) -> str:
+        """Get the 1-hop graph neighbours of a known entity.
+
+        More surgical than query_world with include_neighbors — no vector search
+        or summary fetching.  Use for "what characters are at this location?"
+        or "what items does this character carry?"
+
+        Args:
+            entity_id: The entity ID to traverse from.
+            relationship_type: Optional filter for relationship type.
+            neighbor_type: Optional filter for neighbour entity type (snake_case).
+        """
+        graph = _get_kuzu_graph()
+        lines: list[str] = []
+
+        # Build optional WHERE clauses for filters
+        extra_where = ""
+        if relationship_type:
+            extra_where += f" AND type(r) = '{relationship_type}'"
+        if neighbor_type:
+            pascal_nt = _resolve_pascal_label(neighbor_type)
+            if pascal_nt:
+                extra_where += f" AND label(m) = '{pascal_nt}'"
+
+        # Outgoing
+        try:
+            for row in graph.query(
+                "MATCH (n)-[r]->(m) "
+                f"WHERE n.id = $nid AND NOT label(m) = 'Chunk'{extra_where} "
+                "RETURN type(r) AS rel, label(m) AS m_label, m.id AS m_id "
+                "LIMIT 50",
+                params={"nid": entity_id},
+            ):
+                m_type = (row.get("m_label") or "").lower()
+                lines.append(
+                    f"  → {row.get('rel')} → {row.get('m_id')} ({m_type})"
+                )
+        except Exception:
+            pass
+
+        # Incoming
+        try:
+            for row in graph.query(
+                "MATCH (m)-[r]->(n) "
+                f"WHERE n.id = $nid AND NOT label(m) = 'Chunk'{extra_where} "
+                "RETURN type(r) AS rel, label(m) AS m_label, m.id AS m_id "
+                "LIMIT 50",
+                params={"nid": entity_id},
+            ):
+                m_type = (row.get("m_label") or "").lower()
+                lines.append(
+                    f"  ← {row.get('rel')} ← {row.get('m_id')} ({m_type})"
+                )
+        except Exception:
+            pass
+
+        if not lines:
+            return f'No neighbours found for entity "{entity_id}".'
+
+        header = f'[Neighbours of "{entity_id}"]'
+        return header + "\n" + "\n".join(lines)
+
+    # ---- Tool: find_path ------------------------------------------------
+
+    @tool
+    async def find_path(
+        entity_id_a: str,
+        entity_id_b: str,
+        max_depth: int = 4,
+    ) -> str:
+        """Find the shortest graph path between two known entity IDs.
+
+        Use when find_relationship returns no results or when the question
+        concerns indirect connections.
+
+        Args:
+            entity_id_a: Starting entity ID.
+            entity_id_b: Target entity ID.
+            max_depth: Maximum path depth (default 4).
+        """
+        graph = _get_kuzu_graph()
+
+        try:
+            results = graph.query(
+                f"MATCH p = shortestPath((a)-[*1..{int(max_depth)}]-(b)) "
+                "WHERE a.id = $id_a AND b.id = $id_b "
+                "AND ALL(n IN nodes(p) WHERE NOT label(n) = 'Chunk') "
+                "RETURN [n IN nodes(p) | {id: n.id, type: label(n)}] AS path_nodes, "
+                "[r IN relationships(p) | type(r)] AS path_rels",
+                params={"id_a": entity_id_a, "id_b": entity_id_b},
+            )
+        except Exception:
+            return (
+                f"No path found between "
+                f'"{entity_id_a}" and "{entity_id_b}" within depth {max_depth}.'
+            )
+
+        if not results:
+            return (
+                f"No path found between "
+                f'"{entity_id_a}" and "{entity_id_b}" within depth {max_depth}.'
+            )
+
+        row = results[0]
+        path_nodes: list[dict[str, str]] = row.get("path_nodes", [])
+        path_rels: list[str] = row.get("path_rels", [])
+
+        if not path_nodes:
+            return (
+                f"No path found between "
+                f'"{entity_id_a}" and "{entity_id_b}" within depth {max_depth}.'
+            )
+
+        first_node = path_nodes[0]
+        last_node = path_nodes[-1]
+        header = (
+            f'[Path: "{first_node.get("id", "")}" ({first_node.get("type", "").lower()}) '
+            f'→ "{last_node.get("id", "")}" ({last_node.get("type", "").lower()})]'
+        )
+        depth = len(path_rels)
+        lines = [header, f"Depth: {depth}"]
+
+        for i, rel in enumerate(path_rels):
+            src = path_nodes[i]
+            dst = path_nodes[i + 1] if i + 1 < len(path_nodes) else path_nodes[-1]
+            lines.append(
+                f"  {src.get('id', '')} → {rel} → {dst.get('id', '')} "
+                f"({dst.get('type', '').lower()})"
+            )
+
+        return "\n".join(lines)
+
+    # ---- Tool: get_source_passages --------------------------------------
+
+    @tool
+    async def get_source_passages(
+        entity_id: str,
+        take_top_matches: int = 5,
+    ) -> list[str]:
+        """Retrieve raw source chunks that mention a known entity.
+
+        Follows MENTIONS edges in the graph — no vector search.  More precise
+        and cheaper than retrieve_source when the entity is already identified.
+
+        Args:
+            entity_id: The entity ID to find source passages for.
+            take_top_matches: Maximum number of passages to return (default 5).
+        """
+        graph = _get_kuzu_graph()
+        texts: list[str] = []
+        try:
+            for row in graph.query(
+                "MATCH (c:Chunk)-[:MENTIONS]->(n) "
+                "WHERE n.id = $entity_id "
+                "RETURN c.text AS text "
+                f"LIMIT {int(take_top_matches)}",
+                params={"entity_id": entity_id},
+            ):
+                text = row.get("text", "")
+                if text:
+                    texts.append(text)
+        except Exception:
+            pass
+
+        return texts if texts else ["No source passages found."]
+
+    return (
+        query_world,
+        retrieve_source,
+        find_relationship,
+        find_relationship_by_name,
+        list_entities,
+        get_neighbors,
+        find_path,
+        get_source_passages,
+    )
 
 
 def extract_text_content(content: Any) -> str:  # noqa: ANN401

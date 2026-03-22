@@ -21,7 +21,7 @@ from zforge.graphs.experience_generation_graph import (
 from zforge.graphs.world_creation_graph import build_create_world_graph
 from zforge.managers.experience_manager import ExperienceManager
 from zforge.managers.zworld_manager import ZWorldManager
-from zforge.models.zforge_config import ZForgeConfig
+from zforge.models.zforge_config import PlayerPreferences, ZForgeConfig
 from zforge.models.results import Experience
 from zforge.models.zworld import ZWorld
 from zforge.services.embedding.embedding_connector import EmbeddingConnector
@@ -368,8 +368,9 @@ class ZForgeManager:
 
     async def start_experience_generation(
         self,
-        world_slug: str,
-        player_prompt: str | None = None,
+        player_prompt: str,
+        world_slugs: list[str] | None = None,
+        player_preferences: PlayerPreferences | None = None,
         on_progress: Callable[[str], None] | None = None,
         on_rationale: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> Experience | None:
@@ -377,10 +378,15 @@ class ZForgeManager:
 
         Parameters
         ----------
-        world_slug:
-            Slug of the Z-World to generate an experience for.
         player_prompt:
-            Optional player prompt / scenario seed.
+            Required free-text description of the desired experience.
+        world_slugs:
+            Optional list of Z-World slugs to ground the generation.  Uses
+            only the first slug for now; an empty list or ``None`` triggers
+            world-free mode (no retrieval tools).
+        player_preferences:
+            Optional player preferences override.  Falls back to stored
+            config preferences if ``None``.
         on_progress:
             Optional callback for streaming status messages to the UI.
         on_rationale:
@@ -391,16 +397,26 @@ class ZForgeManager:
         Experience | None
             The saved Experience on success, or None on failure.
         """
-        log.info("start_experience_generation: ENTERED  world_slug=%r", world_slug)
-        # Load world data
-        zworld = self.zworld_manager.read(world_slug)
-        log.info("start_experience_generation: read zworld=%r", zworld)
-        if zworld is None:
-            log.warning("start_experience_generation: world '%s' not found", world_slug)
-            return None
-        zworld_kvp = dataclasses.asdict(zworld)
-        z_bundle_root = str(self.zworld_manager._world_root(world_slug))  # type: ignore[reportPrivateUsage]
-        log.info("start_experience_generation: z_bundle_root=%r", z_bundle_root)
+        prefs = player_preferences or self._config.preferences
+
+        # Resolve world data (world-free mode if no slugs)
+        world_slug: str | None = None
+        zworld_kvp: dict[str, Any] | None = None
+        z_bundle_root: str | None = None
+
+        if world_slugs:
+            world_slug = world_slugs[0]
+            log.info("start_experience_generation: ENTERED  world_slug=%r", world_slug)
+            zworld = self.zworld_manager.read(world_slug)
+            log.info("start_experience_generation: read zworld=%r", zworld)
+            if zworld is None:
+                log.warning("start_experience_generation: world '%s' not found", world_slug)
+                return None
+            zworld_kvp = dataclasses.asdict(zworld)
+            z_bundle_root = str(self.zworld_manager._world_root(world_slug))  # type: ignore[reportPrivateUsage]
+            log.info("start_experience_generation: z_bundle_root=%r", z_bundle_root)
+        else:
+            log.info("start_experience_generation: ENTERED  world-free mode")
 
         # Build graph (cached)
         if self._experience_generation_graph is None:
@@ -445,7 +461,7 @@ class ZForgeManager:
             "zworld_kvp": zworld_kvp,
             "world_slug": world_slug,
             "z_bundle_root": z_bundle_root,
-            "preferences": {},
+            "preferences": prefs.to_dict(),
             "player_prompt": player_prompt,
             "outline": None,
             "research_notes": None,
@@ -486,8 +502,10 @@ class ZForgeManager:
             compiled = result.get("compiled_output")
             exp_slug = result.get("experience_slug", "untitled")
             if compiled:
+                # Use world_slug or "world-free" as the folder key
+                folder_slug = world_slug or "world-free"
                 experience = self.experience_manager.create(
-                    world_slug, exp_slug, compiled
+                    folder_slug, exp_slug, compiled
                 )
                 log.info(
                     "start_experience_generation: saved experience slug=%r",
