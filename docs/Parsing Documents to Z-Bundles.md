@@ -206,7 +206,7 @@ Each context chunk is immediately re-split into smaller sub-chunks for vector st
 - **Class:** `langchain_community.vectorstores.LanceDB`
 - **Method:** `from_documents`
 - **Params:** `documents` (list), `embedding` (configured embedding model), `connection` (LanceDB connection), `table_name="chunks"` (canonical table name per [RAG and GRAG Implementation](RAG%20and%20GRAG%20Implementation.md#implementation))
-- **`entity_type` casing contract:** The `entity_type` column in LanceDB must be the **snake_case** form of the PascalCase KuzuDB node table name — e.g. `Character` → `"character"`, `TimePeriod` → `"time_period"`, `BeliefSystem` → `"belief_system"`. This is the value passed in the `entity_type` filter of `query_world` and `retrieve_source`. The authoritative mapping is in the Z-Bundle type spec (e.g. [Z-World § Implementation](Z-World.md#implementation)).
+- **`entity_type` casing contract:** The `entity_type` column in LanceDB must be the **snake_case** form of the PascalCase KuzuDB node table name — e.g. `Character` → `"character"`, `TimePeriod` → `"time_period"`, `BeliefSystem` → `"belief_system"`. This is the value passed in the `entity_type` filter of `query_entities` and `retrieve_source`. The authoritative mapping is in the Z-Bundle type spec (e.g. [Z-World § Implementation](Z-World.md#implementation)).
 - **Note:** The embedding model used here must be recorded in the Z-Bundle's KVP store (`embedding_model_name`, `embedding_model_size_bytes`) and must match the model used at query time.
 
 ### B. Graph Ingestion (KuzuDB)
@@ -293,7 +293,7 @@ Default: a fast, cheap model is appropriate here (e.g. `gemini-2.5-flash-lite`).
 
 ### Configuration
 
-- **`entity_summarization_enabled`** (`bool`, default `true`) — set to `false` to skip Phase 5 entirely for quick/draft ingestion. When disabled, `query_world` falls back to the `chunks` table only.
+- **`entity_summarization_enabled`** (`bool`, default `true`) — set to `false` to skip Phase 5 entirely for quick/draft ingestion. When disabled, `query_entities` falls back to the `chunks` table only.
 - **`entity_summarization_max_passages`** (`int`, default `20`) — maximum number of passages (by relevance rank) to consider before applying the character budget.
 - **`entity_summarization_max_chars`** (`int`, default `40000`) — hard character budget for the total passage text passed to the LLM. Passages are added in relevance order until this limit is reached. Prevents context overflow on frequently-mentioned entities in large source documents.
 
@@ -372,7 +372,7 @@ ZForge does **not** use the GraphRAG library directly for the following reasons:
 - **On the event loop thread (async def, no offloading):** llama.cpp model loading and inference are CPU-intensive and block the event loop entirely, freezing the Toga UI for minutes with no feedback.
 - **Via `asyncio.to_thread` or a general `ThreadPoolExecutor`:** `ggml_metal` (the GPU backend for llama.cpp on macOS) binds its Metal command queue to the OS thread on which the model is *first loaded*. A general thread pool may dispatch subsequent calls to a different thread, causing Metal to silently hang with no error or timeout.
 
-**Correct pattern:** Use a **module-level `ThreadPoolExecutor(max_workers=1)`** (named `_LLAMA_EXECUTOR`). All embedding computation is dispatched to this executor via `await loop.run_in_executor(_LLAMA_EXECUTOR, fn)`. Because the executor has exactly one worker thread, every call is guaranteed to land on the same OS thread, satisfying Metal's thread-affinity requirement while releasing the event loop so the UI stays responsive. `_LLAMA_EXECUTOR` is defined in `document_parsing_graph.py` and imported by `world_creation_graph.py` for use in `query_world`.
+**Correct pattern:** Use a **module-level `ThreadPoolExecutor(max_workers=1)`** (named `_LLAMA_EXECUTOR`). All embedding computation is dispatched to this executor via `await loop.run_in_executor(_LLAMA_EXECUTOR, fn)`. Because the executor has exactly one worker thread, every call is guaranteed to land on the same OS thread, satisfying Metal's thread-affinity requirement while releasing the event loop so the UI stays responsive. `_LLAMA_EXECUTOR` is defined in `document_parsing_graph.py` and imported by `world_creation_graph.py` for use in `query_entities`.
 
 ### `lancedb.connect()` deadlocks in any asyncio context
 
@@ -392,7 +392,7 @@ This affects both the write path (`LanceDBVectorStore.from_documents`) and the r
 
 **Pitfall:** Constructing `KuzuGraph(db)` without `allow_dangerous_requests=True` raises an error at runtime.
 
-**Correct pattern:** Always construct as `KuzuGraph(db, allow_dangerous_requests=True)`. This applies wherever `KuzuGraph` is instantiated — both in `graph_ingestion_node` (write path) and `query_world` (read path in the summarizer and librarian tools).
+**Correct pattern:** Always construct as `KuzuGraph(db, allow_dangerous_requests=True)`. This applies wherever `KuzuGraph` is instantiated — both in `graph_ingestion_node` (write path) and `query_entities` (read path in the summarizer and librarian tools).
 
 ### `KuzuGraph.add_graph_documents` requires `allowed_relationships` as triplets
 

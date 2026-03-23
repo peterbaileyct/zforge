@@ -54,7 +54,7 @@ ALLOWED_RELATIONSHIPS: list[str] = [
 ]
 
 # Cache open KuzuGraph connections keyed by graph_path to avoid re-opening the
-# database on every query_world tool call.
+# database on every query_entities tool call.
 
 _KUZU_GRAPH_CACHE: dict[str, Any] = {}
 
@@ -227,7 +227,7 @@ def make_world_query_tools(
 
     The returned tools are:
 
-    1. ``query_world`` — semantic entity matching + graph expansion + optional
+    1. ``query_entities`` — semantic entity matching + graph expansion + optional
        neighbour hydration.
     2. ``retrieve_source`` — verbatim source passage retrieval from the chunks
        table.
@@ -351,19 +351,21 @@ def make_world_query_tools(
             lambda: embedding_connector.get_embeddings().embed_query(query),  # type: ignore[union-attr]
         )
         db = await lancedb.connect_async(vector_path)
+        entity_type_filterable = (table_name == "entities")
         try:
             tbl = await db.open_table(table_name)
         except Exception:
             if table_name == "entities":
                 try:
                     tbl = await db.open_table("chunks")
+                    entity_type_filterable = False  # chunks table has no entity_type column
                 except Exception:
                     return []
             else:
                 return []
 
         search_q = await tbl.search(query_vec, query_type="vector")
-        if entity_type:
+        if entity_type and entity_type_filterable:
             search_q = search_q.where(f"entity_type = '{entity_type}'")
         results_arrow = await search_q.limit(take_top_matches).to_arrow()
         # Convert to list of dicts
@@ -393,10 +395,10 @@ def make_world_query_tools(
             return candidate
         return None
 
-    # ---- Tool: query_world ----------------------------------------------
+    # ---- Tool: query_entities -------------------------------------------
 
     @tool
-    async def query_world(
+    async def query_entities(
         query: str,
         entity_type: str | None = None,
         take_top_matches: int = 1,
@@ -516,7 +518,7 @@ def make_world_query_tools(
 
         Executes two Cypher queries: direct edges in either direction and
         shared 1-hop neighbours.  Use when entity IDs are already known from
-        a prior query_world response.
+        a prior query_entities response.
 
         Args:
             entity_id_a: First entity ID.
@@ -676,7 +678,7 @@ def make_world_query_tools(
     ) -> str:
         """Get the 1-hop graph neighbours of a known entity.
 
-        More surgical than query_world with include_neighbors — no vector search
+        More surgical than query_entities with include_neighbors — no vector search
         or summary fetching.  Use for "what characters are at this location?"
         or "what items does this character carry?"
 
@@ -840,7 +842,7 @@ def make_world_query_tools(
         return texts if texts else ["No source passages found."]
 
     return (
-        query_world,
+        query_entities,
         retrieve_source,
         find_relationship,
         find_relationship_by_name,

@@ -51,6 +51,11 @@ class ExperienceGenerationState(TypedDict):
     qa_feedback: str | None
     audit_feedback: str | None
 
+    # Debugger handoff — used when routing non-Ink content through ink_debugger
+    debugger_mode: str | None        # "ink" or "json"; drives ink_debugger dispatch
+    debugger_return_node: str | None # node to route to after debugger completes
+    debugger_input: str | None       # raw content to repair in JSON mode
+
     # Arbiter inputs (set by reviewer when Story Editor rejects; cleared by arbiter)
     story_editor_feedback: str | None   # Raw Story Editor rejection reason
     tech_editor_feedback: str | None    # Raw Tech Editor rejection reason when TE also failed

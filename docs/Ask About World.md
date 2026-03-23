@@ -21,8 +21,8 @@ flowchart TD
     end
 
     subgraph Tools
-        T_query_world[query_world] --> R_entities
-        T_query_world --> R_graph
+        T_query_entities[query_entities] --> R_entities
+        T_query_entities --> R_graph
         T_retrieve_source[retrieve_source] --> R_chunks
     end
 
@@ -37,7 +37,7 @@ flowchart TD
     P_librarian <-.-> S_zworld_kvp
     P_librarian <-.-> S_user_question
     P_librarian <-.-> S_answer
-    T_query_world <-.-> P_librarian
+    T_query_entities <-.-> P_librarian
     T_retrieve_source <-.-> P_librarian
 ```
 
@@ -72,9 +72,9 @@ The world context and user question are combined into a single `HumanMessage`:
 - **Default provider:** Google
 - **Default model:** `gemini-2.5-flash`
 - **Graph file:** `src/zforge/graphs/ask_about_world_graph.py`
-- The Librarian agent follows the [LangGraph tool call pattern](Processes.md#langgraph-tool-call-pattern): it calls `model.bind_tools([query_world, retrieve_source]).invoke(messages)` directly and loops until the model emits no further tool calls, then writes `answer` from the final message content.
+- The Librarian agent follows the [LangGraph tool call pattern](Processes.md#langgraph-tool-call-pattern): it calls `model.bind_tools([query_entities, retrieve_source]).invoke(messages)` directly and loops until the model emits no further tool calls, then writes `answer` from the final message content.
 - The system prompt is a single `SystemMessage` containing only the behavioural instruction. The world context JSON is placed in the `HumanMessage`, prepended to the question. See pitfall below regarding JSON in the system prompt on Groq/Llama models.
-- **`query_world`** is the primary retrieval tool. Returns matched entity summaries, their 1-hop graph relationships (with populated property values), and optionally adjacent node summaries — all in a single call (see [Unified Entity Query](RAG%20and%20GRAG%20Implementation.md#unified-entity-query-query_world--primary-tool)). The Librarian **should** supply `entity_type` when the question targets a specific type; `include_neighbors=True` for network/relationship questions; `take_top_matches` > 1 for ambiguous queries where multiple entities may match.
+- **`query_entities`** is the primary retrieval tool. Returns matched entity summaries, their 1-hop graph relationships (with populated property values), and optionally adjacent node summaries — all in a single call (see [Unified Entity Query](RAG%20and%20GRAG%20Implementation.md#unified-entity-query-query_entities--primary-tool)). The Librarian **should** supply `entity_type` when the question targets a specific type; `include_neighbors=True` for network/relationship questions; `take_top_matches` > 1 for ambiguous queries where multiple entities may match.
 - **`retrieve_source`** searches the LanceDB `chunks` table for raw verbatim source passages. Use when exact wording is required — contradictions, rumours, specific quotes (see [Verbatim Source Retrieval](RAG%20and%20GRAG%20Implementation.md#verbatim-source-retrieval-retrieve_source)).
 - **`find_relationship_by_name`** answers questions of the form "what is the relationship between X and Y?" by resolving two plain-text names via vector lookup and then performing a direct graph traversal. Use `find_relationship` directly when stable entity IDs are already known from a prior tool response (see [Relationship Query](RAG%20and%20GRAG%20Implementation.md#relationship-query-find_relationship-find_relationship_by_name)).
 - **`list_entities`** returns a deterministic catalog of all entities of a given type — no vector search. Use for questions like "who are all the characters in this world?" (see [Entity Catalog](RAG%20and%20GRAG%20Implementation.md#entity-catalog-list_entities)).
@@ -88,7 +88,7 @@ The world context and user question are combined into a single `HumanMessage`:
 ### Pitfall: World JSON in the system prompt causes malformed tool calls on Groq/Llama models
 Embedding variable JSON content (such as `zworld_kvp`) in the system prompt for `llama-3.3-70b-versatile` (and related Llama models) via Groq causes the model to generate tool calls in a broken format:
 ```
-<function=query_world{"query": "…"}</function>
+<function=query_entities{"query": "…"}</function>
 ```
 Note the missing `>` delimiter. Groq rejects this with HTTP 400 `tool_use_failed`. The underlying cause is that Groq's server-side Llama chat template embeds tool definitions using `<function=name>` delimiters; any `<` or `>` characters present in the system turn (common in world text containing arrows, comparisons, or HTML) corrupt the template tokenisation.
 

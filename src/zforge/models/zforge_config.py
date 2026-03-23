@@ -95,7 +95,7 @@ class ZForgeConfig:
     entity_summarization_enabled: bool = True
     entity_summarization_max_passages: int = 20
     entity_summarization_max_chars: int = 40000
-    debug_experience_artifacts: bool = False
+    debug_experience_artifacts: bool = True
     debug_artifact_retention_days: int = 30
 
     def to_dict(self) -> dict[str, Any]:
@@ -165,6 +165,6 @@ class ZForgeConfig:
             entity_summarization_enabled=data.get("entity_summarization_enabled", True),
             entity_summarization_max_passages=data.get("entity_summarization_max_passages", 20),
             entity_summarization_max_chars=data.get("entity_summarization_max_chars", 40000),
-            debug_experience_artifacts=data.get("debug_experience_artifacts", False),
+            debug_experience_artifacts=data.get("debug_experience_artifacts", True),
             debug_artifact_retention_days=data.get("debug_artifact_retention_days", 30),
         )

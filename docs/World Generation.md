@@ -25,8 +25,8 @@ flowchart LR
     end
 
     subgraph Tools
-        T_query_world[query_world] --> R_entities
-        T_query_world --> R_graph
+        T_query_entities[query_entities] --> R_entities
+        T_query_entities --> R_graph
         T_retrieve_source[retrieve_source] --> R_chunks
     end
 
@@ -52,7 +52,7 @@ flowchart LR
     P_dup_check <-.-> S_overwrite_decision
     P_finalizer <-.-> S_zworld_kvp
     P_finalizer <-.-> S_world_uuid
-    T_query_world <-.-> P_summarizer
+    T_query_entities <-.-> P_summarizer
     T_retrieve_source <-.-> P_summarizer
 ```
 
@@ -70,7 +70,7 @@ The authoritative `allowed_nodes`, `allowed_relationships`, `relationship_proper
 After the hybrid data store is populated, an LLM node queries it to produce the KVP metadata for the Z-World (all KVP fields except `slug` and `uuid`, which are derived deterministically in Step 3). Default: `gemini-2.5-flash-lite` (Google).
 
 The Summarizer LLM is given access to the Z-Bundle via **LangChain retriever tools** bound through the standard [LLM Abstraction Layer](LLM%20Abstraction%20Layer.md) tool-binding mechanism:
-- A **`query_world` tool** — returns matched entity summaries, 1-hop graph relationships, and optionally adjacent node summaries in a single call (see [Unified Entity Query](RAG%20and%20GRAG%20Implementation.md#unified-entity-query-query_world--primary-tool)). Primary tool for all entity and relationship lookups.
+- A **`query_entities` tool** — returns matched entity summaries, 1-hop graph relationships, and optionally adjacent node summaries in a single call (see [Unified Entity Query](RAG%20and%20GRAG%20Implementation.md#unified-entity-query-query_entities--primary-tool)). Primary tool for all entity and relationship lookups.
 - A **`retrieve_source` tool** — returns raw verbatim source passages from the `chunks` table. For use when exact wording matters (see [Verbatim Source Retrieval](RAG%20and%20GRAG%20Implementation.md#verbatim-source-retrieval-retrieve_source)).
 
 The LLM freely invokes these tools as needed before producing its final JSON output.

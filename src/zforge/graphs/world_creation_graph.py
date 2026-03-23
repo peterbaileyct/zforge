@@ -177,13 +177,13 @@ def _make_summarizer_node(
 
         # Build retriever tools for this Z-Bundle
         (
-            query_world, retrieve_source, _find_rel, _find_rel_name,
+            query_entities, retrieve_source, _find_rel, _find_rel_name,
             _list_ent, _get_nb, _find_p, _get_src,
         ) = make_world_query_tools(
             z_bundle_root, ALLOWED_NODES, embedding_connector
         )
 
-        tools = [query_world, retrieve_source]
+        tools = [query_entities, retrieve_source]
         messages: list[BaseMessage] = list(state.get("messages") or [])
 
         # If this is the first invocation, seed with the system/human messages

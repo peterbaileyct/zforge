@@ -30,7 +30,7 @@ flowchart TD
 
     %% Subgraph: External Tools
     subgraph Tools [External Tools & Services]
-        T1_qw{{query_world}}
+        T1_qw{{query_entities}}
         T1_rs{{retrieve_source}}
         T2{{Ink Compiler}}
     end
@@ -50,6 +50,8 @@ flowchart TD
     Node_Outline_Res --> Node_Outline
     Node_Outline -- "Outline Ready" --> S3
     Node_Outline -- "Outline Ready" --> S3a
+    Node_Outline -- "Invalid JSON" --> Node_Debug
+    Node_Outline -- "JSON Repair Failed" --> Fail((Exit))
 
     Node_Review_Outline{outline_reviewer}
     A2 & A3 -.-> Node_Review_Outline
@@ -96,7 +98,8 @@ flowchart TD
 
     Node_Compile -- "Syntax Errors" --> Node_Debug[ink_debugger]
     A6 -.-> Node_Debug
-    Node_Debug -- "Retry" --> Node_Compile
+    Node_Debug -- "Retry (ink)" --> Node_Compile
+    Node_Debug -- "Retry (json)" --> Node_Outline
     Node_Debug -- "Critical Fail" --> Fail((Exit))
 
     %% Step 4: Functional QA & Final Review
@@ -125,7 +128,7 @@ flowchart TD
 
 The following are provided as inputs to the graph at entry:
 
-- **World KVP** (optional): The [ZWorld](../src/zforge/models/zworld.py) KVP metadata for a selected world. If not provided, the retrieval tools (`query_world`, `retrieve_source`, etc.) are not available and the Outliner and downstream agents operate on the player prompt and player preferences alone.
+- **World KVP** (optional): The [ZWorld](../src/zforge/models/zworld.py) KVP metadata for a selected world. If not provided, the retrieval tools (`query_entities`, `retrieve_source`, etc.) are not available and the Outliner and downstream agents operate on the player prompt and player preferences alone.
 - **World slug** (optional): The kebab-case slug identifying the selected world. Required if World KVP is provided; used to locate the Z-World hybrid data store and to construct the output path.
 - **Player preferences** (required): The player's preference profile, including tone, complexity, content advisory tolerances, target length, and target knot count.
 - **Player prompt** (required): A free-text description from the player of the experience they want (e.g. "a tense diplomatic negotiation with the High Council").
@@ -142,6 +145,17 @@ The following are provided as inputs to the graph at entry:
         If you need additional world data before writing the outline, output ONLY a JSON object with key
         "research_request" containing your focused question(s) for the research assistant. You may do this
         as many times as needed; each time you will receive updated Research Notes.
+
+        IMPORTANT: The research assistant can only answer factual questions about the world — who characters
+        are, what abilities they have, how factions relate, where locations are, what events have occurred
+        in canon. It cannot make creative decisions for you. You are responsible for inventing the specific
+        events, threats, motivations, consequences, and timeline placement of the story. If the player
+        prompt says "Alice secretly saves Bob's life," it is YOUR job to decide what the threat is, why
+        Alice intervenes, and how — informed by the world data you gather about those characters.
+        Good research requests: "Who is Alice?", "What abilities does Alice have?", "What factions
+        threaten Bob's people?", "What relationship exists between Alice and Bob?"
+        Bad research requests: "What should the threat to Bob be?", "Why would Alice want to save him?"
+
         Once you have sufficient context, produce the final output as ONLY a JSON object with these keys:
         - "experience_title": a short, evocative title for this experience
         - "outline": Structured Markdown of scenes and branching points (using === knot_names ===). The
@@ -187,13 +201,43 @@ The following are provided as inputs to the graph at entry:
           puzzle complexity) and any editor feedback provided.
         ```
 * **Researcher** — nodes: `outline_researcher`, `prose_researcher`, default: `Google` / `gemini-2.5-flash-lite`
-    * Data retrieval specialist. Activated when `outline_author` or `prose_writer` emits a `research_request`. Both researcher nodes share a single LLM configuration entry with slug `researcher` (configurable in the LLM config UI). Has full access to `query_world`, `retrieve_source`, `find_relationship`, `find_relationship_by_name`, `list_entities`, `get_neighbors`, `find_path`, and `get_source_passages` tools (see [Retrieval Patterns](RAG%20and%20GRAG%20Implementation.md#retrieval-patterns)). After retrieving relevant data, combines results with any existing Research Notes and returns the consolidated notes to the calling node.
+    * Data retrieval specialist. Activated when `outline_author` or `prose_writer` emits a `research_request`. Both researcher nodes share a single LLM configuration entry with slug `researcher` (configurable in the LLM config UI). Has full access to `query_entities`, `retrieve_source`, `find_relationship`, `find_relationship_by_name`, `list_entities`, `get_neighbors`, `find_path`, and `get_source_passages` tools (see [Retrieval Patterns](RAG%20and%20GRAG%20Implementation.md#retrieval-patterns)). After retrieving relevant data, combines results with any existing Research Notes and returns the consolidated notes to the calling node.
         * Prompt:
         ```
         You are a Research Assistant with access to the Z-World hybrid data store.
         You have received a research request from a creative agent. Your task is:
-        1. Use the available retrieval tools to gather all data relevant to the request.
-        2. Combine the retrieved data with the existing Research Notes provided below, avoiding duplication.
+
+        1. Use the retrieval tools to gather all data relevant to the request. Understand
+           what each tool is for:
+           - query_entities: Look up specific entities (characters, locations, factions, etc.)
+             by name or description. Returns a synthesized summary plus graph relationships.
+             Best for: "Who is Alice?", "What is the Northern Kingdom?"
+           - retrieve_source: Search the original source text for relevant passages. Returns
+             verbatim chunks. Best for: topical questions, world mechanics, environmental
+             details, specific quotes, or anything spread across the source rather than
+             captured in a single entity summary.
+           - find_relationship_by_name: Find how two named entities are connected in the
+             world graph. Best for: "What is the relationship between Alice and Bob?"
+           - list_entities: Get a catalog of all entities of a type. Best for building a
+             roster: "Who are all the characters?", "What locations exist?"
+           - get_neighbors: Get all graph connections from a known entity ID (returned by
+             query_entities). More surgical follow-up after an initial entity lookup.
+           - get_source_passages: Get raw source text mentioning a known entity ID. Cheaper
+             than retrieve_source when the entity is already identified.
+           - find_relationship / find_path: For known entity IDs — direct and indirect graph
+             connections.
+           If the request contains multiple questions, make a SEPARATE tool call for each one before
+           synthesizing — do not try to answer all questions with a single broad tool call.
+           Guidance on less-obvious types: use entity_type="time_period" (or
+           list_entities(entity_type="time_period")) for questions about when events occur;
+           use entity_type="concept" or entity_type="belief_system" for questions about magic
+           systems, prophecy mechanics, or world rules; use retrieve_source with keyword-rich
+           queries for thematic questions not tied to a single named entity.
+           Break broad questions into specific lookups. For example, "What threats face
+           Bob's people?" should become a query_entities call for Bob's faction plus a
+           retrieve_source call for threats or enemies of that faction.
+        2. Combine the retrieved data with the existing Research Notes provided, avoiding
+           duplication.
         3. Return ONLY a JSON object with exactly this key:
            - "research_notes": the updated consolidated bulleted list of factual world data.
         ```
@@ -208,12 +252,22 @@ The following are provided as inputs to the graph at entry:
         4.	Every choice block must contain at least two options. A block with only one choice is not a real decision — either remove it and use a divert directly, or split the content into genuine alternatives.
         
 * **Senior Scripter (Debugger)** — node: `ink_debugger`, default: `OpenAI` / `gpt-4.1`
-    * Advanced troubleshooting. Resolves complex syntax errors, compiler warnings, and infinite loop recursion that the Junior Scripter fails to fix.
-        * Prompt:
+    * Multi-mode repair node. Dispatches on `debugger_mode` in state:
+        * **`"ink"` mode** — resolves complex Ink syntax errors and compiler warnings. Receives `ink_script` and `compiler_errors`; writes the fixed script back to `ink_script`; routes to `ink_compile_check`.
+        * **`"json"` mode** — repairs a malformed LLM JSON response. Receives the raw broken output in `debugger_input`; writes the repaired JSON string back to `debugger_input` (clearing `debugger_mode`); routes to `debugger_return_node` (e.g. `outline_author`), which re-parses it directly.
+        * The maximum total debug iterations (`compile_fix_count`) is shared across both modes and enforced by `MAX_COMPILE_FIX_ITERATIONS = 3`.
+        * **Ink prompt:**
         ```
         You are a Senior Game Developer. Fix a broken Ink script based on compiler error logs.
         1.	Fix syntax errors and break infinite loops.
         2.	Return the functional script without altering the author's prose style.
+        ```
+        * **JSON prompt:**
+        ```
+        You are a JSON Repair Specialist. The text below is a malformed or improperly-formatted
+        LLM response that was supposed to be a valid JSON object. Extract and return the intended
+        JSON object, fixing any syntax errors, escaped characters, or extraneous markdown.
+        Return ONLY the valid JSON object — no markdown fencing, no explanation.
         
 * **QA Analyst (Functional Playtester)** — node: `ink_qa`, default: `Google` / `gemini-2.5-flash`
     * Playability validation. Uses high-context reasoning to ensure path reachability, terminality, and logical story flow in the final script.
@@ -256,6 +310,16 @@ where `world_slug` is the input world slug, and `experience_slug` is the kebab-c
 - **Process slug:** `experience_generation`
 - **LLM nodes:** `outline_author`, `outline_researcher`, `outline_reviewer`, `arbiter_outline`, `prose_writer`, `prose_researcher`, `prose_reviewer`, `arbiter_prose`, `ink_scripter`, `ink_debugger`, `ink_qa`, `ink_auditor`
 
+### Debugger State Fields
+
+Three fields in `ExperienceGenerationState` support the multi-mode debugger node:
+
+- **`debugger_mode: str | None`** — Set by any node that routes to `ink_debugger`. Value is `"ink"` (fix Ink script) or `"json"` (repair a malformed JSON response). Cleared to `None` by the debugger after completing its repair pass.
+
+- **`debugger_return_node: str | None`** — Set alongside `debugger_mode` to identify which node should receive the corrected output. The routing function `_route_after_debugger` reads this field to determine the next node. Currently used values: `"ink_compile_check"` (Ink mode) and `"outline_author"` (JSON mode).
+
+- **`debugger_input: str | None`** — Used in JSON mode only. Set to the raw malformed LLM response to be repaired. The debugger overwrites this field with the repaired JSON string; the receiving node (`debugger_return_node`) then parses it directly and clears all three debugger fields.
+
 ### Research State Fields
 
 Two fields in `ExperienceGenerationState` support the researcher node pattern:
@@ -268,7 +332,7 @@ Two fields in `ExperienceGenerationState` support the researcher node pattern:
 
 Two additional fields in `ExperienceGenerationState` drive live UI feedback during generation:
 
-- **`last_step_rationale: str | None`** — Set by each review/QA/audit/arbiter node (`outline_reviewer`, `arbiter_outline`, `prose_reviewer`, `arbiter_prose`, `ink_qa`, `ink_auditor`) to a 1–2 sentence summary of the decision. Displayed in the UI below the status label and appended to the action log.
+- **`last_step_rationale: str | None`** — Set by each review/QA/audit/arbiter node (`outline_reviewer`, `arbiter_outline`, `prose_reviewer`, `arbiter_prose`, `ink_qa`, `ink_auditor`) to a 1–2 sentence summary of the decision. Also set by `outline_author` and `prose_writer` to `"Research needed: {research_request}"` when they emit a research request, so the UI shows the specific question (e.g. "Research needed: Does Darkstalker already know Glory?"). Displayed in the UI below the status label and appended to the action log.
 
 - **`action_log: list[dict[str, Any]]`** — Set by researcher nodes (`outline_researcher`, `prose_researcher`) to record each tool call made. Entries have `type: "tool_call"` and carry `node`, `role`, `tool`, and `args` keys. The `run_process` runner fires `on_rationale_update` for each entry immediately when the node completes. These appear in the UI action log as `> [role] tool_name(arg_preview)` lines so it is visible which world-store queries were made during research.
 

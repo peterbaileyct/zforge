@@ -3,7 +3,7 @@
 Single-node agentic RAG graph per docs/Ask About World.md:
 
 1. librarian_node — answers a user question about a Z-World by querying its
-   Z-Bundle via all eight retrieval tools (query_world, retrieve_source,
+   Z-Bundle via all eight retrieval tools (query_entities, retrieve_source,
    find_relationship, find_relationship_by_name, list_entities,
    get_neighbors, find_path, get_source_passages), then produces a
    plain-text answer.
@@ -66,7 +66,7 @@ def _make_librarian_node(
 
         # Build retriever tools for this Z-Bundle
         (
-            query_world, retrieve_source, find_relationship,
+            query_entities, retrieve_source, find_relationship,
             find_relationship_by_name, list_entities, get_neighbors,
             find_path, get_source_passages,
         ) = make_world_query_tools(
@@ -74,7 +74,7 @@ def _make_librarian_node(
         )
 
         tools = [
-            query_world, retrieve_source, find_relationship,
+            query_entities, retrieve_source, find_relationship,
             find_relationship_by_name, list_entities, get_neighbors,
             find_path, get_source_passages,
         ]

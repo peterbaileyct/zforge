@@ -65,6 +65,7 @@ class ZForgeManager:
         initial_state: dict[str, Any],
         on_status_update: Callable[[str], None] | None = None,
         on_rationale_update: Callable[[str, dict[str, Any]], None] | None = None,
+        on_state_update: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """Run a LangGraph graph, streaming status_message and rationale updates to the UI."""
         log.info("run_process: starting — initial status=%r", initial_state.get("status"))
@@ -122,6 +123,8 @@ class ZForgeManager:
                         elif on_rationale_update and msg and not action_log and rationale is None:
                             # Fallback for nodes that provide neither structured events nor rationale
                             on_rationale_update(msg, {"rationale": msg, "node": node_name})
+                        if on_state_update:
+                            on_state_update(final_state)
         except Exception as exc:  # surface unexpected errors to caller/UI
             log.exception("run_process: unhandled exception — %s", exc)
             msg = f"Process failed: {exc}"
@@ -484,6 +487,9 @@ class ZForgeManager:
             "audit_feedback": None,
             "story_editor_feedback": None,
             "tech_editor_feedback": None,
+            "debugger_mode": None,
+            "debugger_return_node": None,
+            "debugger_input": None,
             "outline_review_count": 0,
             "prose_review_count": 0,
             "compile_fix_count": 0,
@@ -497,15 +503,27 @@ class ZForgeManager:
         }
 
         log.info("start_experience_generation: calling run_process")
+        _on_state_update: Callable[[dict[str, Any]], None] | None = None
+        if self._config.debug_experience_artifacts:
+            _debug_base = Path(self._config.experience_folder).parent / "experiences-generation"
+
+            def _write_debug_on_update(state: dict[str, Any]) -> None:
+                slug = state.get("experience_slug") or "unknown"
+                self._write_debug_artifacts(state, _debug_base / slug / "debug")
+
+            _on_state_update = _write_debug_on_update
+
         result = await self.run_process(
             graph=self._experience_generation_graph,
             initial_state=initial_state,
             on_status_update=on_progress,
             on_rationale_update=on_rationale,
+            on_state_update=_on_state_update,
         )
         log.info("start_experience_generation: run_process returned status=%r", result.get("status"))
 
         if self._config.debug_experience_artifacts:
+            # Final write to capture any last-node changes not caught mid-run
             exp_slug = result.get("experience_slug") or "unknown"
             debug_base = Path(self._config.experience_folder).parent / "experiences-generation"
             self._write_debug_artifacts(result, debug_base / exp_slug / "debug")
@@ -547,6 +565,7 @@ class ZForgeManager:
         Creates the directory if it does not exist. Non-fatal — logs on error.
         """
         _ARTIFACTS: list[tuple[str, str | None]] = [
+            ("research_request.txt", state.get("research_request")),
             ("research_notes.txt", state.get("research_notes")),
             ("outline.txt", state.get("outline")),
             ("prose_draft.txt", state.get("prose_draft")),

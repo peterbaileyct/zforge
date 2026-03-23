@@ -34,7 +34,7 @@ Two LanceDB tables are written per Z-Bundle. Both share the same column schema:
 
 **`chunks` table** — one row per retrieval sub-chunk from Phase 3 of the parsing pipeline. The `entity_id` is the KuzuDB `Chunk` node id. This is the ground-truth verbatim record and is used for precise source passage retrieval.
 
-**`entities` table** — one row per entity node from Phase 5 (entity summarization). The `entity_id` is the entity's KuzuDB node `id` (e.g. a `Character` id). This table is used as the default for entity-centric queries — a single call to `query_world` returns a synthesized 1–5 paragraph summary of the entity plus its graph neighbourhood without a follow-up call. If Phase 5 is skipped (`entity_summarization_enabled = false`), this table is absent and `query_world` falls back to the `chunks` table.
+**`entities` table** — one row per entity node from Phase 5 (entity summarization). The `entity_id` is the entity's KuzuDB node `id` (e.g. a `Character` id). This table is used as the default for entity-centric queries — a single call to `query_entities` returns a synthesized 1–5 paragraph summary of the entity plus its graph neighbourhood without a follow-up call. If Phase 5 is skipped (`entity_summarization_enabled = false`), this table is absent and `query_entities` falls back to the `chunks` table.
 
 ### Graph
 
@@ -75,10 +75,10 @@ These patterns apply to any [Process](Processes.md) that queries a Z-Bundle. The
 ][pop;[']p;'[]p;'/[p;'/[po;'/[pol;'/[]-pm ,'
 ]=[-p'/
 ]]]]]]
-### Unified Entity Query (`query_world`) — primary tool
+### Unified Entity Query (`query_entities`) — primary tool
 
 ```
-query_world(query: str, entity_type: str | None = None, take_top_matches: int = 1, include_neighbors: bool = False) → str
+query_entities(query: str, entity_type: str | None = None, take_top_matches: int = 1, include_neighbors: bool = False) → str
 ```
 
 Resolves a natural-language question to a structured response in a single tool call by combining semantic entity matching, graph neighbourhood expansion, and optional neighbour summary hydration:
@@ -169,7 +169,7 @@ Resolved: "the city" → "Ankh-Morpork" (location)
 
 If either lookup returns no result, returns a plain statement that the named entity could not be resolved, and does not call `find_relationship`.
 
-This is the default tool for relationship questions when the caller has plain-text names rather than stable entity IDs. Use `find_relationship` directly when IDs are already known (e.g. from a prior `query_world` response).
+This is the default tool for relationship questions when the caller has plain-text names rather than stable entity IDs. Use `find_relationship` directly when IDs are already known (e.g. from a prior `query_entities` response).
 
 ### Entity Catalog (`list_entities`)
 
@@ -215,7 +215,7 @@ Return format (structured text):
   → located_in → The Disc (region)
 ```
 
-Use when iteratively building scene context from entities already identified — more surgical than `query_world` with neighbour hydration because it involves no vector search and no summary fetching. Also useful for "what characters are at this location?", "what items does this character carry?", etc.
+Use when iteratively building scene context from entities already identified — more surgical than `query_entities` with neighbour hydration because it involves no vector search and no summary fetching. Also useful for "what characters are at this location?", "what items does this character carry?", etc.
 
 ### Path Query (`find_path`)
 
@@ -262,7 +262,7 @@ RETURN c.text
 LIMIT $take_top_matches
 ```
 
-Returns the raw `text` field of each matching `Chunk` node as a list of strings. Use when an agent needs verbatim source grounding for a specific entity it has already found via `query_world` or another graph tool, without paying the cost of a second vector round-trip.
+Returns the raw `text` field of each matching `Chunk` node as a list of strings. Use when an agent needs verbatim source grounding for a specific entity it has already found via `query_entities` or another graph tool, without paying the cost of a second vector round-trip.
 
 ### Vector-Seeded Graph Expansion (code pattern)
 
@@ -281,9 +281,9 @@ LanceDB supports full-text (BM25) indexing alongside vector indexing on the same
 
 Each Z-Bundle is stored in `bundles/{typeslug}/{slug}/` on the local filesystem (see [File Storage](File%20Storage.md) for the resolved base path).
 
-The `make_world_query_tools(z_bundle_root, allowed_node_labels, embedding_connector)` factory in `graph_utils.py` constructs and returns all eight tools as a tuple: `query_world`, `retrieve_source`, `find_relationship`, `find_relationship_by_name`, `list_entities`, `get_neighbors`, `find_path`, and `get_source_passages`. It takes `allowed_node_labels` as a parameter (the same `allowed_nodes` list used at ingest time) so the graph keyword branch can query the correct set of node tables without hardcoding them. **Each Z-Bundle type that uses these tools must pass its own `allowed_nodes` list when constructing them.**
+The `make_world_query_tools(z_bundle_root, allowed_node_labels, embedding_connector)` factory in `graph_utils.py` constructs and returns all eight tools as a tuple: `query_entities`, `retrieve_source`, `find_relationship`, `find_relationship_by_name`, `list_entities`, `get_neighbors`, `find_path`, and `get_source_passages`. It takes `allowed_node_labels` as a parameter (the same `allowed_nodes` list used at ingest time) so the graph keyword branch can query the correct set of node tables without hardcoding them. **Each Z-Bundle type that uses these tools must pass its own `allowed_nodes` list when constructing them.**
 
-### Pitfall: `query_world` graph expansion must execute queries, not just return the schema
+### Pitfall: `query_entities` graph expansion must execute queries, not just return the schema
 
 A naive implementation that returns only `graph.get_schema` for the graph expansion step wastes a full LLM round-trip: the model receives schema with no data and retries. The schema dump is also misleading when the tool docstring advertises entity and relationship lookup.
 
@@ -293,4 +293,4 @@ A naive implementation that returns only `graph.get_schema` for the graph expans
 
 2. **Keyword branch** — otherwise, search the `id` property of every node table in `allowed_node_labels` case-insensitively via `toLower(n.id) CONTAINS $kw`, using `KuzuGraph.query(cypher, params={"kw": keyword})` (parameterised queries are supported). For each matched entity, expand one hop of outgoing and incoming edges — excluding `Chunk` nodes — and include relationship type via `type(r)` and neighbour type via `label(m)`. Return schema only when no entities match.
 
-This ensures that for factual questions (e.g. "who are the queens?"), the graph expansion returns matched entity nodes and their relationships directly as part of the `query_world` response, eliminating the need for a second tool call (~1–2 s saved on Groq).
+This ensures that for factual questions (e.g. "who are the queens?"), the graph expansion returns matched entity nodes and their relationships directly as part of the `query_entities` response, eliminating the need for a second tool call (~1–2 s saved on Groq).

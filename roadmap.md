@@ -24,6 +24,7 @@ Player preferences are currently set via numeric sliders (1-10 scales). This may
 | **HIGH** | Limited feedback during generation | Add animated progress indicator alongside `statusMessage` | Partial (statusMessage exists) |
 | **HIGH** | No cancellation of in-progress generation | Add cancel button to GenerateExperienceScreen | TODO |
 | **MEDIUM** | Slider-only preferences may miss nuance | Implement "Ultima-style questions" for preference onboarding | TODO |
+| **MEDIUM** | Story Editor uses generic lore rules; produces false positives that trigger unnecessary Arbiter invocations | Implement world lore briefings: LLM-generated, world-specific constraint checklists injected into the Story Editor's system prompt. Per-world briefings are cached and invalidated on world update; per-world-combination briefings are generated lazily for crossover stories. A thin per-story resolution layer appends how the player's premise navigates any cross-world conflicts. See [Experience Generation § Story Editor Briefings](docs/Experience%20Generation.md) | Not started |
 | **MEDIUM** | No experience preview before playing | Add "Read Synopsis" option generated from Outline artifact | Not started |
 | **MEDIUM** | Multiple experience management unclear | Clarify UI for browsing/managing multiple experiences per world | Not started |
 | **MEDIUM** | World generation cannot run on mobile | Hide "Generate World" on iOS/Android (JVM and heavy LLM stack not available on-device); note that a server-side world generation path may be added later | Not started |
@@ -40,6 +41,7 @@ Player preferences are currently set via numeric sliders (1-10 scales). This may
 
 ### Experience Generation.md
 - [ ] Pictures and possibly sounds support for multimedia experiences
+- [ ] World lore briefings: cached per-world (and lazily per-world-combination) LLM-generated Story Editor constraint checklists, plus a per-story resolution layer referencing the player prompt (reduces false-positive lore violations and Arbiter invocations)
 
 ### Managers, Processes, and MCP Server.md
 - [ ] Allow parallel processing for scalability (web app backend scenario)
@@ -93,6 +95,7 @@ Player preferences are currently set via numeric sliders (1-10 scales). This may
 - Animated progress during generation
 - Cancel button for generation
 - Experience synopsis preview
+- World lore briefings for Story Editor (per-world cached; per-world-combination lazy; per-story resolution layer)
 
 ### v1.2 - Enhanced Onboarding
 - Ultima-style preference questions

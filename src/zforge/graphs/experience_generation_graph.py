@@ -12,7 +12,8 @@ Twelve-node pipeline per docs/Experience Generation.md:
 8.  arbiter_prose — same as arbiter_outline but for prose stage
 9.  ink_scripter — translates prose draft into Ink script
 10. ink_compile_check — non-LLM; invokes IfEngineConnector.build()
-11. ink_debugger — fixes compiler errors in Ink script
+11. ink_debugger — multi-mode repair node: fixes Ink compiler errors (mode=ink) or
+    malformed JSON LLM responses (mode=json); destination node stored in state
 12. ink_qa — virtual playtest for pathing errors
 13. ink_auditor — final structural audit
 
@@ -73,6 +74,20 @@ If you need additional world data before writing the outline, output ONLY a \
 JSON object with key "research_request" containing your focused question(s) \
 for the research assistant. You may do this as many times as needed; each \
 time you will receive updated Research Notes.
+
+IMPORTANT: The research assistant can only answer factual questions about the \
+world — who characters are, what abilities they have, how factions relate, \
+where locations are, what events have occurred in canon. It cannot make \
+creative decisions for you. You are responsible for inventing the specific \
+events, threats, motivations, consequences, and timeline placement of the \
+story. If the player prompt says "Alice secretly saves Bob's life," it is \
+YOUR job to decide what the threat is, why Alice intervenes, and how — \
+informed by the world data you gather about those characters.
+Good research requests: "Who is Alice?", "What abilities does Alice have?", \
+"What factions threaten Bob's people?", "What relationship exists between \
+Alice and Bob?"
+Bad research requests: "What should the threat to Bob be?", "Why would \
+Alice want to save him?"
 
 Once you have sufficient context, produce the final output as ONLY a JSON \
 object (no markdown fencing) with exactly these keys:
@@ -154,14 +169,51 @@ You are a Research Assistant with access to the Z-World hybrid data store.
 
 You have received a research request from a creative agent. Your task is:
 
-1. Use the available retrieval tools to gather all data relevant to the \
-request. The valid entity_type values for query_world are: {_ENTITY_TYPES}. \
-Do not query for any other entity type.
+1. Use the retrieval tools to gather all data relevant to the request. \
+Understand what each tool is for:
+   - query_entities: Look up specific entities (characters, locations, \
+factions, etc.) by name or description. Returns a synthesized summary plus \
+graph relationships. Best for: "Who is Alice?", "What is the Northern Kingdom?"
+   - retrieve_source: Search the original source text for relevant passages. \
+Returns verbatim chunks. Best for: topical questions, world mechanics, \
+environmental details, specific quotes, or anything spread across the source \
+rather than captured in a single entity summary.
+   - find_relationship_by_name: Find how two named entities are connected in \
+the world graph. Best for: "What is the relationship between Alice and Bob?"
+   - list_entities: Get a catalog of all entities of a type. Best for building \
+a roster: "Who are all the characters?", "What locations exist?"
+   - get_neighbors: Get all graph connections from a known entity ID (returned \
+by query_entities). More surgical follow-up after an initial entity lookup.
+   - get_source_passages: Get raw source text mentioning a known entity ID. \
+Cheaper than retrieve_source when the entity is already identified.
+   - find_relationship / find_path: For known entity IDs — direct and indirect \
+graph connections.
+   The valid entity_type values for query_entities are: {_ENTITY_TYPES}. \
+Do not query for any other entity type. Guidance on less-obvious types: \
+use entity_type="time_period" (or list_entities(entity_type="time_period")) \
+for questions about when events occur; use entity_type="concept" or \
+entity_type="belief_system" for questions about magic systems, prophecy \
+mechanics, or world rules; use retrieve_source with keyword-rich queries \
+for thematic questions that are not tied to a single named entity.
+   If the request contains multiple questions, make a SEPARATE tool call for \
+each one before synthesizing your results — do not try to answer all \
+questions with a single broad tool call. Break broad questions into specific \
+lookups. For example, "What threats face Bob's people?" should become a \
+query_entities call for Bob's faction plus a retrieve_source call for threats \
+or enemies of that faction.
+
+   BE PERSISTENT: If query_entities returns "No matching entities found", do \
+NOT give up. Try a different tool or a different search query. Specifically, \
+if query_entities fails to find a character or location by name, use \
+retrieve_source with broader keywords to find relevant passages in the \
+source text. Your goal is to find information, not to report that you \
+couldn't find it on your first try.
 2. Combine the retrieved data with the existing Research Notes provided, \
 avoiding duplication.
 3. Return ONLY a JSON object (no markdown fencing) with exactly this key: \
 - "research_notes": the updated consolidated bulleted list of factual \
-world data."""
+world data. If no information was found after all attempts, explain \
+briefly what you tried and what was missing."""
 
 _INK_SCRIPTER_PROMPT = """\
 You are a Narrative Implementation Engineer. Translate the prose draft \
@@ -182,6 +234,13 @@ compiler error logs.
 2. Return the functional script without altering the author's prose style.
 
 Produce the complete fixed Ink script as your response — nothing else."""
+
+_JSON_DEBUGGER_PROMPT = """\
+You are a JSON Repair Specialist. The text below is a malformed or \
+improperly-formatted LLM response that was supposed to be a valid JSON object. \
+Extract and return the intended JSON object, fixing any syntax errors, \
+escaped characters, or extraneous markdown.
+Return ONLY the valid JSON object — no markdown fencing, no explanation."""
 
 _INK_QA_PROMPT = """\
 You are a Game QA Lead. Perform a "Virtual Playtest" of the final Ink \
@@ -296,6 +355,39 @@ def _make_outline_author_node(
 
     @log_node("outline_author")
     async def outline_author_node(state: ExperienceGenerationState) -> dict[str, Any]:
+        # If the debugger has provided a repaired JSON response, parse it directly.
+        if state.get("debugger_input") is not None:
+            parsed = _parse_json_response(state["debugger_input"] or "")
+            clear_debugger: dict[str, Any] = {
+                "debugger_input": None,
+                "debugger_return_node": None,
+                "last_step_rationale": None,
+                "action_log": [],
+                "outline_review_count": 0,
+                "prose_review_count": 0,
+                "compile_fix_count": 0,
+                "script_rewrite_count": 0,
+            }
+            if not parsed:
+                log.warning("outline_author: debugger-fixed JSON still unparseable — failing")
+                return {
+                    **clear_debugger,
+                    "status": "failed",
+                    "failure_reason": "Debugger could not produce valid JSON for outline",
+                    "status_message": "Experience generation failed: outline JSON could not be repaired",
+                }
+            title = parsed.get("experience_title", "Untitled Experience")
+            return {
+                **clear_debugger,
+                "outline": parsed.get("outline", ""),
+                "research_notes": parsed.get("research_notes", ""),
+                "experience_title": title,
+                "experience_slug": _slugify(title),
+                "outline_feedback": None,
+                "status": "reviewing_outline",
+                "status_message": f"Outline '{title}' drafted (repaired); under review...",
+            }
+
         if not _model_cache:
             _model_cache.append(llm_connector.get_model(model_name))
         model = _model_cache[0]
@@ -329,11 +421,16 @@ def _make_outline_author_node(
         parsed = _parse_json_response(content)
 
         if not parsed:
-            log.warning("outline_author: could not parse JSON — preview: %r", content[:300])
+            log.warning(
+                "outline_author: could not parse JSON — routing to debugger; preview: %r",
+                content[:300],
+            )
             return {
-                "status": "failed",
-                "failure_reason": "Outline author did not produce valid JSON",
-                "status_message": "Experience generation failed: outline output was not valid JSON",
+                "status": "debugging",
+                "status_message": "Outline author produced invalid JSON; routing to debugger...",
+                "debugger_mode": "json",
+                "debugger_return_node": "outline_author",
+                "debugger_input": content,
                 "last_step_rationale": None,
                 "action_log": [],
                 "outline_review_count": 0,
@@ -345,12 +442,13 @@ def _make_outline_author_node(
 
         # If the author is requesting research, route to the researcher node
         if "research_request" in parsed:
+            _rq = parsed["research_request"]
             return {
-                "research_request": parsed["research_request"],
+                "research_request": _rq,
                 "research_caller": "outline_author",
                 "status": "researching_outline",
                 "status_message": "Outliner requesting research...",
-                "last_step_rationale": None,
+                "last_step_rationale": f"Research needed: {_rq}",
                 "action_log": [],
                 "outline_review_count": 0,
                 "prose_review_count": 0,
@@ -666,12 +764,13 @@ def _make_prose_writer_node(
         # Check if the writer is requesting research
         parsed = _parse_json_response(content)
         if parsed and "research_request" in parsed:
+            _rq = parsed["research_request"]
             return {
-                "research_request": parsed["research_request"],
+                "research_request": _rq,
                 "research_caller": "prose_writer",
                 "status": "researching_prose",
                 "status_message": "Writer requesting research...",
-                "last_step_rationale": None,
+                "last_step_rationale": f"Research needed: {_rq}",
                 "action_log": [],
                 "outline_review_count": 0,
                 "prose_review_count": 0,
@@ -718,25 +817,30 @@ def _make_researcher_node(
         tools: list[Any] = []
         if z_bundle_root is not None:
             (
-                query_world, retrieve_source, find_relationship,
+                query_entities, retrieve_source, find_relationship,
                 find_relationship_by_name, list_entities, get_neighbors,
                 find_path, get_source_passages,
             ) = make_world_query_tools(
                 z_bundle_root, ALLOWED_NODES, embedding_connector
             )
             tools = [
-                query_world, retrieve_source, find_relationship,
+                query_entities, retrieve_source, find_relationship,
                 find_relationship_by_name, list_entities, get_neighbors,
                 find_path, get_source_passages,
             ]
 
         request = state.get("research_request") or ""
         existing_notes = state.get("research_notes") or ""
+        zworld_kvp = state.get("zworld_kvp") or {}
+        world_title = zworld_kvp.get("title", "Unknown World")
+        world_summary = zworld_kvp.get("summary", "No summary available.")
 
         messages: list[BaseMessage] = [
             SystemMessage(content=_RESEARCHER_PROMPT),
             HumanMessage(
                 content=(
+                    f"You are researching for the world: {world_title}\n"
+                    f"World Summary: {world_summary}\n\n"
                     f"Existing Research Notes:\n{existing_notes}\n\n"
                     f"Research Request:\n{request}"
                 )
@@ -782,7 +886,20 @@ def _make_researcher_node(
 
         content = extract_text_content(getattr(response, "content", ""))
         parsed = _parse_json_response(content)
-        updated_notes = (parsed or {}).get("research_notes", existing_notes)
+        if not parsed:
+            # If JSON parsing fails, treat the entire content as the updated notes.
+            # This is a safe fallback since the prompt explicitly asks for consolidation.
+            parsed = {"research_notes": content.strip() or existing_notes}
+            log.warning(
+                "researcher_node: failed to parse JSON from final response (using raw content as notes). Preview: %r",
+                content[:100],
+            )
+        updated_notes = parsed.get("research_notes", existing_notes)
+
+        if not updated_notes:
+            # If still empty, explicitly mark it as "No notes found" so the author
+            # stops looping forever, and so it shows up in debug artifacts.
+            updated_notes = f"[System] Research complete but no notes were generated. Request was: {request}"
 
         return {
             "research_notes": updated_notes,
@@ -890,6 +1007,8 @@ def _make_ink_compile_check_node(if_engine_connector: IfEngineConnector):
         return {
             **zero_counters,
             "compiler_errors": build_result.errors,
+            "debugger_mode": "ink",
+            "debugger_return_node": "ink_compile_check",
             "status": "debugging",
             "status_message": f"Compilation failed with {len(build_result.errors)} error(s); debugging...",
         }
@@ -901,7 +1020,15 @@ def _make_ink_debugger_node(
     llm_connector: LlmConnector,
     model_name: str | None = None,
 ):
-    """Fixes compiler errors in Ink script."""
+    """Multi-mode repair node.
+
+    Dispatches on ``state["debugger_mode"]``:
+
+    * ``"ink"`` (default) — fixes Ink compiler errors in ``ink_script``.
+    * ``"json"`` — repairs a malformed LLM JSON response stored in
+      ``debugger_input`` and writes the fixed text back to ``debugger_input``
+      for the caller (``debugger_return_node``) to re-parse.
+    """
     _model_cache: list[Any] = []
 
     @log_node("ink_debugger")
@@ -910,6 +1037,43 @@ def _make_ink_debugger_node(
             _model_cache.append(llm_connector.get_model(model_name))
         model = _model_cache[0]
 
+        mode = state.get("debugger_mode") or "ink"
+        zero_counters: dict[str, Any] = {
+            "outline_review_count": 0,
+            "prose_review_count": 0,
+            "compile_fix_count": 1,  # always increment — guards max-iteration check
+            "script_rewrite_count": 0,
+        }
+
+        if mode == "json":
+            raw_input = state.get("debugger_input") or ""
+            messages: list[BaseMessage] = [
+                SystemMessage(content=_JSON_DEBUGGER_PROMPT),
+                HumanMessage(content=f"Malformed LLM response to fix:\n{raw_input}"),
+            ]
+            response = await model.ainvoke(messages)
+            content = extract_text_content(getattr(response, "content", ""))
+
+            # Strip markdown fencing if present
+            if content.startswith("```"):
+                lines = content.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                content = "\n".join(lines)
+
+            return {
+                **zero_counters,
+                "debugger_input": content,
+                "debugger_mode": None,
+                # debugger_return_node is left intact for _route_after_debugger
+                "status": "debugging",
+                "status_message": "JSON repaired; retrying parse...",
+                "messages": messages,
+            }
+
+        # --- ink mode (default) ---
         errors_text = "\n".join(state.get("compiler_errors", []))
         messages = [
             SystemMessage(content=_INK_DEBUGGER_PROMPT),
@@ -932,13 +1096,11 @@ def _make_ink_debugger_node(
             content = "\n".join(lines)
 
         return {
+            **zero_counters,
             "ink_script": content,
+            "debugger_mode": None,
             "status": "recompiling",
             "status_message": "Script debugged; recompiling...",
-            "outline_review_count": 0,
-            "prose_review_count": 0,
-            "compile_fix_count": 1,
-            "script_rewrite_count": 0,
             "messages": messages,
         }
 
@@ -1061,11 +1223,14 @@ def _make_ink_auditor_node(
 
 
 def _route_after_outline_author(state: ExperienceGenerationState) -> str:
-    """Route after outline_author: research_request → outline_researcher, fail → end, else → reviewer."""
+    """Route after outline_author: research_request → outline_researcher, debugging → ink_debugger, fail → end, else → reviewer."""
     if state.get("research_request"):
         return "outline_researcher"
-    if state.get("status") == "failed":
+    status = state.get("status", "")
+    if status == "failed":
         return "end"
+    if status == "debugging":
+        return "ink_debugger"
     return "outline_reviewer"
 
 
@@ -1156,15 +1321,12 @@ def _route_after_compile(state: ExperienceGenerationState) -> str:
 
 
 def _route_after_debugger(state: ExperienceGenerationState) -> str:
-    """Route after ink_debugger: retry compile or fail on max iterations."""
-    total = sum(
-        state.get(k, 0)
-        for k in ("compile_fix_count",)
-    )
+    """Route after ink_debugger: use debugger_return_node, or fail on max iterations."""
+    total = state.get("compile_fix_count", 0)
     if total >= MAX_COMPILE_FIX_ITERATIONS:
-        log.warning("ink_debugger: max compile fix iterations reached — critical fail")
+        log.warning("ink_debugger: max fix iterations reached — critical fail")
         return "end"
-    return "ink_compile_check"
+    return state.get("debugger_return_node") or "ink_compile_check"
 
 
 def _route_after_qa(state: ExperienceGenerationState) -> str:
@@ -1361,6 +1523,7 @@ def build_experience_generation_graph(
         {
             "outline_researcher": "outline_researcher",
             "outline_reviewer": "outline_reviewer",
+            "ink_debugger": "ink_debugger",
             "end": END,
         },
     )
@@ -1438,6 +1601,7 @@ def build_experience_generation_graph(
         _route_after_debugger,
         {
             "ink_compile_check": "ink_compile_check",
+            "outline_author": "outline_author",
             "end": END,
         },
     )
