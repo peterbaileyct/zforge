@@ -65,6 +65,7 @@ class ExperienceGenerationState(TypedDict):
     prose_review_count: Annotated[int, operator.add]
     compile_fix_count: Annotated[int, operator.add]
     script_rewrite_count: Annotated[int, operator.add]
+    research_call_count: Annotated[int, operator.add]  # shared across all research-capable nodes
 
     # Status
     status: str

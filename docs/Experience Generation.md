@@ -144,7 +144,7 @@ The following are provided as inputs to the graph at entry:
         You are a Lead Narrative Designer. Convert world data and player intent into a structural "beat sheet."
         If you need additional world data before writing the outline, output ONLY a JSON object with key
         "research_request" containing your focused question(s) for the research assistant. You may do this
-        as many times as needed; each time you will receive updated Research Notes.
+        up to the remaining research budget shown in the message; each time you will receive updated Research Notes.
 
         IMPORTANT: The research assistant can only answer factual questions about the world — who characters
         are, what abilities they have, how factions relate, where locations are, what events have occurred
@@ -190,15 +190,24 @@ The following are provided as inputs to the graph at entry:
     * High-fidelity creative writing. Expands the approved outline into vivid prose and dialogue. Does **not** have direct access to retrieval tools; instead, it may issue a **research request** (see Researcher below) to fetch additional detail before writing or mid-draft.
         * Prompt:
         ```
-        You are a Professional Fiction Author. Expand the Outline into vivid narrative text.
+        You are a Professional Fiction Author writing INTERACTIVE FICTION, not a traditional linear narrative.
+        You are writing prose that will be translated into an Ink script with real player choices and branching paths.
         If you need additional world data (sensory details, character traits, relationships), output ONLY a
         JSON object with key "research_request" containing your focused question(s) for the research
-        assistant. You may do this as many times as needed; each time you will receive updated Research Notes.
+        assistant. You may do this up to the remaining research budget shown in the message; each time you will receive updated Research Notes.
         Once you have sufficient context, write the full prose draft as plain text (no JSON wrapper).
-        - Target the word count specified in player preferences.
-        - Write dialogue and descriptions. Mark choices with [Choice Text].
-        - Respect all player preference scales (character/plot, narrative/dialog, levity, logical vs. mood,
-          puzzle complexity) and any editor feedback provided.
+        Follow these rules exactly:
+        1. STRUCTURE: Follow the outline scene by scene. Use the === knot_name === markers from the outline
+           as section headers in your prose draft so each section of prose maps directly to a knot.
+        2. BRANCHING IS MANDATORY: At every choice point defined in the outline, you MUST write the full
+           prose for EVERY branch — not just a label. Each branch is a separate section of narrative text
+           that the player will experience exclusively. Mutually exclusive paths must all be written in full.
+           A draft with only one thread of narrative is incomplete.
+        3. CHOICE PRESENTATION: Introduce each choice with the player's options listed as: + [Choice Text].
+           Then, on a new section beneath each option, write the prose that follows from that choice.
+        4. Target the total word count specified in player preferences, distributed across all branches.
+        5. Respect all player preference scales (character/plot, narrative/dialog, levity, logical vs. mood,
+           puzzle complexity) and any editor feedback provided.
         ```
 * **Researcher** — nodes: `outline_researcher`, `prose_researcher`, default: `Google` / `gemini-2.5-flash-lite`
     * Data retrieval specialist. Activated when `outline_author` or `prose_writer` emits a `research_request`. Both researcher nodes share a single LLM configuration entry with slug `researcher` (configurable in the LLM config UI). Has full access to `query_entities`, `retrieve_source`, `find_relationship`, `find_relationship_by_name`, `list_entities`, `get_neighbors`, `find_path`, and `get_source_passages` tools (see [Retrieval Patterns](RAG%20and%20GRAG%20Implementation.md#retrieval-patterns)). After retrieving relevant data, combines results with any existing Research Notes and returns the consolidated notes to the calling node.
@@ -322,11 +331,13 @@ Three fields in `ExperienceGenerationState` support the multi-mode debugger node
 
 ### Research State Fields
 
-Two fields in `ExperienceGenerationState` support the researcher node pattern:
+Three fields in `ExperienceGenerationState` support the researcher node pattern:
 
 - **`research_request: str | None`** — Set by `outline_author` or `prose_writer` when they need additional world data. The presence of this field routes execution to the appropriate researcher node (`outline_researcher` or `prose_researcher`). Cleared to `None` by the researcher after fulfilling the request.
 
 - **`research_caller: str | None`** — Set alongside `research_request` to identify which node issued the request (`"outline_author"` or `"prose_writer"`). Used by the researcher's routing logic to return control to the correct node. Cleared to `None` by the researcher.
+
+- **`research_call_count: Annotated[int, operator.add]`** — Tracks the total number of research calls emitted across all research-capable nodes (`outline_author` and `prose_writer`) for the lifetime of the run. Incremented by 1 each time a research_request is accepted and routed. The shared limit is `MAX_RESEARCH_CALL_ITERATIONS = 8`. Once this limit is reached, the requesting node re-invokes the LLM with a "limit reached" message and forces it to produce its final output; the count is never decremented and never resets between the outline and prose phases.
 
 ### Observability State Fields
 

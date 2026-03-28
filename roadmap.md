@@ -32,6 +32,8 @@ Player preferences are currently set via numeric sliders (1-10 scales). This may
 | **LOW** | Web storage unspecified | Decide on IndexedDB vs cloud storage for web platform | TODO |
 | **LOW** | No undo/rewind during gameplay | Consider adding common IF rewind feature | Not started |
 | **LOW** | "Create Your Universe" supports only Z-Worlds | Extend the data source selector on the Create Experience screen to support additional knowledge source types: user-supplied character rosters (structured character sheets outside a full Z-World), and real-world knowledge bases sourced from publicly editable encyclopaedias (useful for educational games that teach real-world facts through interactive narrative). Requires defining ingestion pipelines and retrieval tool variants for each new source type. | Not started |
+| **MEDIUM** | Entity dedup misses title/honorific variants (`"Glory"` vs `"Queen Glory"`) | Add a second merge pass to Phase 4: for each pair of entities of the same type, if one id is a whole-word substring of the other, flag as duplicates regardless of embedding distance. Cheap, no new dependencies. See [Parsing § Phase 4](docs/Parsing%20Documents%20to%20Z-Bundles.md#phase-4-entity-deduplication) | Not started |
+| **LOW** | Entity dedup cannot resolve semantic coreference (`"the DragonWing Queen"` / `"Glory"`) | Implement Phase 4b: an LLM-assisted coreference pass that, given entity names and sample passages, identifies aliases that are semantically unrelated at the string level. More expensive; should run only when `entity_coreference_enabled` is true. | Not started |
 | **LOW** | `RecursiveCharacterTextSplitter` for retrieval pass produces fixed-size, topic-agnostic chunks | Replace with `SemanticChunker` (topic-shift-aware, no LLM cost) per [Parsing § Chunking Strategy](docs/Parsing%20Documents%20to%20Z-Bundles.md#chunking-strategy) | TODO |
 | **LOW** | Propositional chunking not implemented | Implement propositional chunking as an optional retrieval-pass mode for high-value worlds; delivers highest per-fact retrieval precision (see [Parsing § Future: Propositional Chunking](docs/Parsing%20Documents%20to%20Z-Bundles.md#future-propositional-chunking)) | Not started |
 | **LOW** | No static type checking for UI breakage | Implement static type checking (Mypy / Pyright) to catch third-party library API/enum changes at compile time | Not started |
@@ -70,6 +72,8 @@ Player preferences are currently set via numeric sliders (1-10 scales). This may
 - [ ] Add `parent_chunk_id` metadata field to retrieval chunks (parent-child tagging)
 - [ ] Propositional chunking as an opt-in retrieval-pass mode for high-value worlds
 - [ ] PROPN-density pre-filter: skip graph extraction on chunks with fewer than N proper nouns per 100 tokens (spaCy POS tagger; language-agnostic entity-type-independent cost saving; implement only after co-reference and dedup are stable)
+- [ ] Phase 4 substring-containment merge pass: flag entity pairs of the same type as duplicates when one id is a whole-word substring of the other (catches honorific/title prepends such as `"Glory"` → `"Queen Glory"`; no LLM cost)
+- [ ] Phase 4b LLM coreference pass: optional (`entity_coreference_enabled`), bounded LLM call that identifies semantically coreferent entities whose string forms share no obvious substring relationship
 
 ### Testing
 - [ ] Unit tests for core services (ZWorldManager, ExperienceManager, config services)

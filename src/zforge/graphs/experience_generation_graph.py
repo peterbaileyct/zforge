@@ -60,6 +60,7 @@ if TYPE_CHECKING:
 MAX_REVIEW_ITERATIONS = 5
 MAX_COMPILE_FIX_ITERATIONS = 3
 MAX_SCRIPT_REWRITE_ITERATIONS = 5
+MAX_RESEARCH_CALL_ITERATIONS = 8
 
 # ---------------------------------------------------------------------------
 # Agent Prompts (from docs/Experience Generation.md § Agent Role & Prompt
@@ -72,8 +73,8 @@ a structural "beat sheet."
 
 If you need additional world data before writing the outline, output ONLY a \
 JSON object with key "research_request" containing your focused question(s) \
-for the research assistant. You may do this as many times as needed; each \
-time you will receive updated Research Notes.
+for the research assistant. You may do this up to the budget shown in the \
+message; each time you will receive updated Research Notes.
 
 IMPORTANT: The research assistant can only answer factual questions about the \
 world — who characters are, what abilities they have, how factions relate, \
@@ -146,21 +147,38 @@ exactly these keys: "status" (either "PASS" or "FAIL") and "feedback" \
 (notes on Z-World violations)."""
 
 _PROSE_WRITER_PROMPT = f"""\
-You are a Professional Fiction Author. Expand the Outline into vivid \
-narrative text.
+You are a Professional Fiction Author writing INTERACTIVE FICTION, not a \
+traditional linear narrative. You are writing prose that will be translated \
+into an Ink script with real player choices and branching paths.
 
 If you need additional world data (sensory details, character traits, \
 relationships), output ONLY a JSON object with key "research_request" \
 containing your focused question(s) for the research assistant. You may \
-do this as many times as needed; each time you will receive updated \
-Research Notes. Valid entity_type values for any world queries are: \
+do this up to the budget shown in the message; each time you will receive \
+updated Research Notes. Valid entity_type values for any world queries are: \
 {_ENTITY_TYPES}.
 
 Once you have sufficient context, write the full prose draft as plain text \
-(no JSON wrapper).
-- Target the word count specified in player preferences.
-- Write dialogue and descriptions. Mark choices with [Choice Text].
-- Respect all player preference scales (character/plot, narrative/dialog, \
+(no JSON wrapper). Follow these rules exactly:
+
+1. STRUCTURE: Follow the outline scene by scene. Use the === knot_name === \
+markers from the outline as section headers in your prose draft so each \
+section of prose maps directly to a knot.
+
+2. BRANCHING IS MANDATORY: At every choice point defined in the outline, \
+you MUST write the full prose for EVERY branch — not just a label. Each \
+branch is a separate section of narrative text that the player will \
+experience exclusively. Mutually exclusive paths must all be written in \
+full. A draft with only one thread of narrative is incomplete.
+
+3. CHOICE PRESENTATION: Introduce each choice with the player's options \
+listed as: + [Choice Text]. Then, on a new section beneath each option, \
+write the prose that follows from that choice.
+
+4. Target the total word count specified in player preferences, distributed \
+across all branches.
+
+5. Respect all player preference scales (character/plot, narrative/dialog, \
 levity, logical vs. mood, puzzle complexity) and any editor feedback \
 provided."""
 
@@ -409,6 +427,13 @@ def _make_outline_author_node(
                 f"\nThe reviewers rejected your previous outline with this "
                 f"feedback. Revise accordingly:\n{state['outline_feedback']}"
             )
+        research_remaining = MAX_RESEARCH_CALL_ITERATIONS - state.get("research_call_count", 0)
+        human_parts.append(f"\nResearch calls remaining: {research_remaining}")
+        if research_remaining <= 0:
+            human_parts.append(
+                "\nRESEARCH LIMIT REACHED: You must produce your final JSON output now "
+                "using only the information already available. Do NOT output a research_request."
+            )
 
         messages: list[BaseMessage] = [
             SystemMessage(content=_OUTLINE_AUTHOR_PROMPT),
@@ -440,22 +465,55 @@ def _make_outline_author_node(
                 "messages": messages,
             }
 
-        # If the author is requesting research, route to the researcher node
+        # If the author is requesting research, check budget then route or force completion
         if "research_request" in parsed:
             _rq = parsed["research_request"]
-            return {
-                "research_request": _rq,
-                "research_caller": "outline_author",
-                "status": "researching_outline",
-                "status_message": "Outliner requesting research...",
-                "last_step_rationale": f"Research needed: {_rq}",
-                "action_log": [],
-                "outline_review_count": 0,
-                "prose_review_count": 0,
-                "compile_fix_count": 0,
-                "script_rewrite_count": 0,
-                "messages": messages,
-            }
+            if state.get("research_call_count", 0) < MAX_RESEARCH_CALL_ITERATIONS:
+                return {
+                    "research_request": _rq,
+                    "research_caller": "outline_author",
+                    "research_call_count": 1,
+                    "status": "researching_outline",
+                    "status_message": "Outliner requesting research...",
+                    "last_step_rationale": f"Research needed: {_rq}",
+                    "action_log": [],
+                    "outline_review_count": 0,
+                    "prose_review_count": 0,
+                    "compile_fix_count": 0,
+                    "script_rewrite_count": 0,
+                    "messages": messages,
+                }
+            # Budget exhausted — force the model to produce its final output now
+            log.warning(
+                "outline_author: research call limit (%d) reached; forcing final output",
+                MAX_RESEARCH_CALL_ITERATIONS,
+            )
+            messages.append(HumanMessage(
+                content=(
+                    f"Research limit of {MAX_RESEARCH_CALL_ITERATIONS} calls reached. "
+                    "You must produce your final JSON output now using only the "
+                    "information you already have."
+                )
+            ))
+            response = await model.ainvoke(messages)
+            messages.append(response)
+            content = extract_text_content(getattr(response, "content", ""))
+            parsed = _parse_json_response(content)
+            if not parsed:
+                return {
+                    "status": "debugging",
+                    "status_message": "Outline author produced invalid JSON after research limit; routing to debugger...",
+                    "debugger_mode": "json",
+                    "debugger_return_node": "outline_author",
+                    "debugger_input": content,
+                    "last_step_rationale": None,
+                    "action_log": [],
+                    "outline_review_count": 0,
+                    "prose_review_count": 0,
+                    "compile_fix_count": 0,
+                    "script_rewrite_count": 0,
+                    "messages": messages,
+                }
 
         title = parsed.get("experience_title", "Untitled Experience")
         return {
@@ -751,6 +809,13 @@ def _make_prose_writer_node(
                 f"\nThe reviewers rejected your previous draft with this "
                 f"feedback. Revise accordingly:\n{state['prose_feedback']}"
             )
+        research_remaining = MAX_RESEARCH_CALL_ITERATIONS - state.get("research_call_count", 0)
+        human_parts.append(f"\nResearch calls remaining: {research_remaining}")
+        if research_remaining <= 0:
+            human_parts.append(
+                "\nRESEARCH LIMIT REACHED: You must write the full prose draft now "
+                "using only the information already available. Do NOT output a research_request."
+            )
 
         messages: list[BaseMessage] = [
             SystemMessage(content=_PROSE_WRITER_PROMPT),
@@ -761,23 +826,40 @@ def _make_prose_writer_node(
         messages.append(response)
         content = extract_text_content(getattr(response, "content", ""))
 
-        # Check if the writer is requesting research
+        # Check if the writer is requesting research (budget-gated)
         parsed = _parse_json_response(content)
         if parsed and "research_request" in parsed:
             _rq = parsed["research_request"]
-            return {
-                "research_request": _rq,
-                "research_caller": "prose_writer",
-                "status": "researching_prose",
-                "status_message": "Writer requesting research...",
-                "last_step_rationale": f"Research needed: {_rq}",
-                "action_log": [],
-                "outline_review_count": 0,
-                "prose_review_count": 0,
-                "compile_fix_count": 0,
-                "script_rewrite_count": 0,
-                "messages": messages,
-            }
+            if state.get("research_call_count", 0) < MAX_RESEARCH_CALL_ITERATIONS:
+                return {
+                    "research_request": _rq,
+                    "research_caller": "prose_writer",
+                    "research_call_count": 1,
+                    "status": "researching_prose",
+                    "status_message": "Writer requesting research...",
+                    "last_step_rationale": f"Research needed: {_rq}",
+                    "action_log": [],
+                    "outline_review_count": 0,
+                    "prose_review_count": 0,
+                    "compile_fix_count": 0,
+                    "script_rewrite_count": 0,
+                    "messages": messages,
+                }
+            # Budget exhausted — force the model to write the prose draft
+            log.warning(
+                "prose_writer: research call limit (%d) reached; forcing prose output",
+                MAX_RESEARCH_CALL_ITERATIONS,
+            )
+            messages.append(HumanMessage(
+                content=(
+                    f"Research limit of {MAX_RESEARCH_CALL_ITERATIONS} calls reached. "
+                    "You must write the full prose draft now using only the "
+                    "information you already have."
+                )
+            ))
+            response = await model.ainvoke(messages)
+            messages.append(response)
+            content = extract_text_content(getattr(response, "content", ""))
 
         # Otherwise the response is the prose draft (plain text)
         return {
